@@ -1,11 +1,12 @@
 # Echoes of Tomorrow - Central Unit
 
-This repository contains the core server-side logic for the **Echoes of Tomorrow** light installation project, developed by Fontys ICT for GLOW Eindhoven 2025.
+This repository contains the core server-side (Master) logic for the **Echoes of Tomorrow** light installation project, developed by Fontys ICT for GLOW Eindhoven 2025. This is done with a Mac Mini.
 
 ## Overview
 The central unit is responsible for:
 - Receiving and processing audio signals
-- Sending commands to microcontrollers controlling the LED arms
+- Sending commands to microcontrollers controlling the LED arms, LED matrix and Toppiece
+- Keeping track of the state
 - Hosting a control interface
 
 ## Project Structure
