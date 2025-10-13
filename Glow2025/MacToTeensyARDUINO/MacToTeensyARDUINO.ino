@@ -1,124 +1,133 @@
 // =====================================================
-// Teensy / Arduino Firmware v3
-// Protocol Implementation (6.2.1.1 / 6.2.1.2)
-// Handles any MASTER:[SRC]:REQUEST:COMMAND{params} format
-// Responds with correct CONFIRM or error
-// Generates random values where parameters are expected
+// Teensy / Arduino Firmware v4 (parallel delayed commands)
+// Handles any [SOURCE]:REQUEST:[COMMAND]{params} format
+// Delayed responses: STAR_ARRIVED & CLIMAX_READY
+// Multiple delayed commands can run in parallel
 // =====================================================
- 
+
+#include <Arduino.h>
+
 String inputBuffer = "";
 bool messageStarted = false;
 const int LED_PIN = LED_BUILTIN;
- 
+
+struct DelayedCommand {
+  String source;
+  String command;   // STAR_ARRIVED or CLIMAX_READY
+  unsigned long triggerTime; // millis() when it should be sent
+  bool active;
+};
+
+const int MAX_DELAYED = 10;
+DelayedCommand delayed[MAX_DELAYED];
+
+// Helper function to schedule delayed commands
+void scheduleDelayedCommand(String source, String command) {
+  for (int i = 0; i < MAX_DELAYED; i++) {
+    if (!delayed[i].active) {
+      delayed[i].source = source;
+      delayed[i].command = command;
+      delayed[i].triggerTime = millis() + random(5000, 8000); // 5–8 seconds
+      delayed[i].active = true;
+      return;
+    }
+  }
+  // Overflow protection
+  Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{too_many_delayed_commands}##");
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   randomSeed(analogRead(0));
+
+  // Initialize delayed commands array
+  for (int i = 0; i < MAX_DELAYED; i++) delayed[i].active = false;
 }
- 
+
 void loop() {
+  // --- Handle incoming serial data ---
   while (Serial.available() > 0) {
     char c = Serial.read();
- 
-    // Start of message detection
+
     if (c == '!' && !messageStarted) {
       messageStarted = true;
       inputBuffer = "!!";
-    }
-    else if (messageStarted) {
+    } else if (messageStarted) {
       inputBuffer += c;
- 
-      // End of message detection
+
       if (inputBuffer.endsWith("##")) {
         handleMessage(inputBuffer);
         inputBuffer = "";
         messageStarted = false;
       }
- 
-      // Overflow protection
+
       if (inputBuffer.length() > 256) {
-        Serial.println("!!MASTER:REQUEST:ERROR:{overflow}##");
+        Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{overflow}##");
         inputBuffer = "";
         messageStarted = false;
       }
     }
   }
+
+  // --- Handle delayed commands ---
+  unsigned long now = millis();
+  for (int i = 0; i < MAX_DELAYED; i++) {
+    if (delayed[i].active && now >= delayed[i].triggerTime) {
+      sendConfirm(delayed[i].source, delayed[i].command);
+      delayed[i].active = false; // deactivate
+    }
+  }
 }
- 
+
 // =====================================================
-// Handle and parse full message
+// Handle and parse full message (2-colon version)
 // =====================================================
 void handleMessage(String msg) {
   msg.trim();
- 
+
   if (!msg.startsWith("!!") || !msg.endsWith("##")) {
-    Serial.println("!!MASTER:REQUEST:ERROR:{invalid_format}##");
+    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{invalid_format}##");
     return;
   }
- 
-  // Strip wrappers
+
   msg.remove(0, 2);
   msg.remove(msg.length() - 2, 2);
- 
-  // Example formats:
-  // MASTER:ARM1:REQUEST:MAKE_STAR{SPEED=100}
-  // MASTER:BROADCAST:REQUEST:RESET##
-  // MASTER:CENTER:REQUEST:BUILDUP_CLIMAX_CENTER{SPEED=80}
- 
-  // Split parts by colon
+
   int c1 = msg.indexOf(':');
   int c2 = msg.indexOf(':', c1 + 1);
-  int c3 = msg.indexOf(':', c2 + 1);
-  int c4 = msg.indexOf(':', c3 + 1);
- 
-  if (c1 < 0 || c2 < 0 || c3 < 0) {
-    Serial.println("!!MASTER:REQUEST:ERROR:{bad_structure}##");
+
+  if (c1 < 0 || c2 < 0) {
+    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{bad_structure}##");
     return;
   }
- 
-  String header1 = msg.substring(0, c1);               // MASTER
-  String source  = msg.substring(c1 + 1, c2);          // ARM1 / CENTER / BROADCAST
-  String maybeType = msg.substring(c2 + 1, c3);        // usually REQUEST
-  String rest;
- 
-  if (c4 > 0) rest = msg.substring(c3 + 1);           // e.g. MAKE_STAR{...}
-  else rest = msg.substring(c3 + 1);
- 
-  // Detect structure dynamically
-  String type;
-  String command;
- 
-  if (maybeType.equalsIgnoreCase("REQUEST")) {
-    type = "REQUEST";
-    command = rest;
-  }
-  else {
-    // if structure has one extra colon, try next part
-    int nextColon = rest.indexOf(':');
-    if (nextColon > 0) {
-      type = rest.substring(0, nextColon);
-      command = rest.substring(nextColon + 1);
-    } else {
-      type = maybeType;
-      command = rest;
-    }
-  }
- 
-  // Extract command before { if exists
+
+  String source = msg.substring(0, c1);
+  String maybeType = msg.substring(c1 + 1, c2);
+  String command = msg.substring(c2 + 1);
+
   int bracePos = command.indexOf('{');
-  if (bracePos > 0) command = command.substring(0, bracePos);
+  if (bracePos >= 0) command = command.substring(0, bracePos);
   command.trim();
- 
+
   blinkLED();
- 
-  if (type.equalsIgnoreCase("REQUEST")) {
-    sendConfirm(command);
+
+  if (maybeType.equalsIgnoreCase("REQUEST")) {
+    // Schedule delayed commands if needed
+    if (command.equalsIgnoreCase("SEND_STAR")) {
+      scheduleDelayedCommand(source, "STAR_ARRIVED");
+    } else if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER")) {
+      scheduleDelayedCommand(source, "CLIMAX_READY");
+    }
+
+    // Always send immediate confirm
+    sendConfirm(source, command);
   } else {
-    Serial.println("!!MASTER:REQUEST:ERROR:{unknown_type_" + type + "}##");
+    Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{unknown_type_" + maybeType + "}##");
   }
 }
- 
+
 // =====================================================
 // Visual blink feedback
 // =====================================================
@@ -127,13 +136,13 @@ void blinkLED() {
   delay(1000);
   digitalWrite(LED_PIN, LOW);
 }
- 
+
 // =====================================================
-// Generate proper CONFIRM messages (6.2.1.2 definitions)
+// Generate proper CONFIRM messages including SOURCE
 // =====================================================
-void sendConfirm(String command) {
-  String msg = "!!MASTER:CONFIRM:";
- 
+void sendConfirm(String source, String command) {
+  String msg = "!!" + source + ":MASTER:CONFIRM:";
+
   if (command.equalsIgnoreCase("MAKE_STAR")) {
     msg += "MAKE_STAR##";
   }
@@ -187,9 +196,8 @@ void sendConfirm(String command) {
     msg += "COMM_ERROR{STRING=Random_Comm_Error_" + String(random(100, 999)) + "}##";
   }
   else {
-    msg = "!!MASTER:REQUEST:ERROR:{unknown_command_" + command + "}##";
+    msg = "!!" + source + ":MASTER:REQUEST:ERROR:{unknown_command_" + command + "}##";
   }
- 
+
   Serial.println(msg);
 }
- 
