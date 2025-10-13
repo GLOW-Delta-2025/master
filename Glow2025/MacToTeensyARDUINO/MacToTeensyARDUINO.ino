@@ -134,12 +134,6 @@ void handleMessage(String msg) {
       } else {
         scheduleDelayedCommand(source, "STAR_ARRIVED");
       }
-    } else if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER")) {
-      if (source.equalsIgnoreCase("BROADCAST")) {
-        for (int i = 0; i < 7; i++) scheduleDelayedCommand(devices[i], "CLIMAX_READY");
-      } else {
-        scheduleDelayedCommand(source, "CLIMAX_READY");
-      }
     }
 
     // Always send immediate confirm
