@@ -38,7 +38,7 @@ void loop() {
  
       // Overflow protection
       if (inputBuffer.length() > 256) {
-        Serial.println("!!MAC:REQUEST:ERROR:{overflow}##");
+        Serial.println("!!MASTER:REQUEST:ERROR:{overflow}##");
         inputBuffer = "";
         messageStarted = false;
       }
@@ -53,7 +53,7 @@ void handleMessage(String msg) {
   msg.trim();
  
   if (!msg.startsWith("!!") || !msg.endsWith("##")) {
-    Serial.println("!!MAC:REQUEST:ERROR:{invalid_format}##");
+    Serial.println("!!MASTER:REQUEST:ERROR:{invalid_format}##");
     return;
   }
  
@@ -73,7 +73,7 @@ void handleMessage(String msg) {
   int c4 = msg.indexOf(':', c3 + 1);
  
   if (c1 < 0 || c2 < 0 || c3 < 0) {
-    Serial.println("!!MAC:REQUEST:ERROR:{bad_structure}##");
+    Serial.println("!!MASTER:REQUEST:ERROR:{bad_structure}##");
     return;
   }
  
@@ -115,7 +115,7 @@ void handleMessage(String msg) {
   if (type.equalsIgnoreCase("REQUEST")) {
     sendConfirm(command);
   } else {
-    Serial.println("!!MAC:REQUEST:ERROR:{unknown_type_" + type + "}##");
+    Serial.println("!!MASTER:REQUEST:ERROR:{unknown_type_" + type + "}##");
   }
 }
  
@@ -187,7 +187,7 @@ void sendConfirm(String command) {
     msg += "COMM_ERROR{STRING=Random_Comm_Error_" + String(random(100, 999)) + "}##";
   }
   else {
-    msg = "!!MAC:REQUEST:ERROR:{unknown_command_" + command + "}##";
+    msg = "!!MASTER:REQUEST:ERROR:{unknown_command_" + command + "}##";
   }
  
   Serial.println(msg);
