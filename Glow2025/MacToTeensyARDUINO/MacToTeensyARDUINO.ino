@@ -169,6 +169,7 @@ void sendConfirm(String source, String command) {
   } else if (command.equalsIgnoreCase("CANCEL_STAR")) {
     msg += "CANCEL_STAR##";
   } else if (command.equalsIgnoreCase("STAR_ARRIVED")) {
+    msg = "!!" + source + ":MASTER:REQUEST:";
     msg += "STAR_ARRIVED{";
     msg += "SPEED=" + String(random(10, 100)) + ",";
     msg += "COLOR=" + String(random(0, 255)) + ",";
