@@ -2,7 +2,7 @@ import serial
 import threading
 import time
 
-SERIAL_PORT = "/dev/tty.usbmodem1101"  # adjust for your setup
+SERIAL_PORT = "/dev/tty.usbmodem14301"  # adjust for your setup
 BAUD_RATE = 115200
 
 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
@@ -13,7 +13,7 @@ def format_message(device, command_type, command, params=None):
         param_str = "{" + ",".join(f"{k}={v}" for k, v in params.items()) + "}"
     else:
         param_str = "{}"
-    return f"!!{device}:{command_type}:{command}:{param_str}##"
+    return f"!!{device}:{command_type}:{command}{param_str}##"
 
 def listen_serial():
     while True:
