@@ -17,6 +17,7 @@ K --> L[Wait 15 seconds]
 L --> M[Reset Star Counter to 0]
 M --> N([Return to Beginning])
 
+%% --- Styling (optional for GitHub light/dark mode) ---
 style A fill:#c6f6d5,stroke:#2f855a,stroke-width:2px
 style N fill:#c6f6d5,stroke:#2f855a,stroke-width:2px
 style B fill:#bee3f8,stroke:#2b6cb0,stroke-width:1px
