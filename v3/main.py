@@ -236,7 +236,7 @@ processor = AudioProcessor(spike_threshold_db=4.0, alpha_rise=0.85, alpha_decay=
 
 @app.route('/')
 def index():
-    return send_file(__file__.replace('v1_web.py', 'v1_web.html'))
+    return send_file(__file__.replace('main.py', 'web.html'))
 
 
 @app.route('/start', methods=['POST'])
@@ -310,7 +310,7 @@ def status():
 if __name__ == '__main__':
     # create a tiny HTML file next to this script if missing
     try:
-        open(__file__.replace('v1_web.py', 'v1_web.html')).close()
+        open(__file__.replace('main.py', 'web.html')).close()
     except Exception:
         pass
     print('Starting web GUI on http://127.0.0.1:5000')
