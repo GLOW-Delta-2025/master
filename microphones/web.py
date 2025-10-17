@@ -99,11 +99,6 @@ def status():
             'avg_db': avg_db,
             'noise_db': noise_db,
             'channel_names': processor.channel_names}
-    # include any stars generated in this window
-    if isinstance(processor._state.get('stars', {}), dict) and processor._state['stars']:
-        resp['stars'] = processor._state['stars']
-        # clear reported stars
-        processor._state['stars'] = {}
     return jsonify(resp)
 
 
