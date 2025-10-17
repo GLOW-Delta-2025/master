@@ -1,4 +1,4 @@
-# Spike Detector
+# Audio Processor
 
 A real-time audio spike and anomaly detection system with an adaptive noise floor. Monitors multiple audio channels and reports detected spikes, as well as longer-duration audio events ("stars").
 
