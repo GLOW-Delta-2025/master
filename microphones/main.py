@@ -11,12 +11,7 @@ class AudioProcessor:
                  alpha_rise=0.95, alpha_decay=0.6,
                  same_source_corr=0.75,
                  min_dB_delta=4.0,
-                 max_delay_ms=10.0,
-                 star_timeout=10.0,
-                 star_hard_limit=10.0,
-                 star_max_spikes=10,
-                 star_decibel_avg=-60.0,
-                 star_activity_db_delta=1.0):
+                 max_delay_ms=10.0):
         self.device = device
         self.channels = tuple(channels)
         self.samplerate = samplerate
@@ -30,14 +25,6 @@ class AudioProcessor:
         self.min_dB_delta = float(min_dB_delta)
         # maximum allowed delay (ms) between same-source signals for NCC check
         self.max_delay_ms = float(max_delay_ms)
-        # star configuration
-        self.star_timeout = float(star_timeout)
-        self.star_hard_limit = float(star_hard_limit)
-        self.star_max_spikes = int(star_max_spikes)
-        # average decibel threshold to consider "some audio" when deciding hard-limit stars
-        self.star_decibel_avg = float(star_decibel_avg)
-        # delta (dB) above noise floor to mark an active chunk
-        self.star_activity_db_delta = float(star_activity_db_delta)
 
         self._lock = threading.Lock()
         self._state = {
@@ -47,10 +34,6 @@ class AudioProcessor:
             'last_print': time.monotonic(),
             'sum_squares': {},
             'count': 0,
-            'last_activity': {},    # last time we saw meaningful audio on channel
-            'last_star': {},        # last time a star was created per channel
-            'spike_count': {},      # spike count since last star per channel
-            'stars': {},            # stars generated since last read
             'last_chunk_db': {},
         }
         # human-readable names for channels; default to empty names
@@ -112,8 +95,6 @@ class AudioProcessor:
                     last_act = self._state['last_activity'][ch]
                 except Exception:
                     last_act = None
-                if db >= noise_db + getattr(self, 'star_activity_db_delta', 1.0):
-                    self._state['last_activity'][ch] = time.monotonic()
                 self._state['sum_squares'][ch] += float(np.dot(data, data))
                 # store the raw samples for later correlation checks
                 # keep per-callback buffer; will be concatenated/cleared in read_and_clear_window
@@ -215,55 +196,6 @@ class AudioProcessor:
                     if same:
                         spikes[ch] = None
 
-            # STAR logic: per-channel star conditions
-            stars_report = {}
-            now = time.monotonic()
-            for ch in self.channels:
-                # ensure counters exist
-                if ch not in self._state['spike_count']:
-                    self._state['spike_count'][ch] = 0
-                if ch not in self._state['last_star']:
-                    self._state['last_star'][ch] = now
-                # count any spike seen in this window
-                if spikes.get(ch) is not None:
-                    self._state['spike_count'][ch] = self._state.get('spike_count', {}).get(ch, 0) + 1
-                sc = self._state['spike_count'].get(ch, 0)
-                last_star = self._state['last_star'].get(ch, now)
-                last_act = self._state['last_activity'].get(ch, None)
-                # Condition 1: max spikes reached
-                triggered = False
-                reason = None
-                if sc >= int(getattr(self, 'star_max_spikes', 10)):
-                    triggered = True
-                    reason = 'max_spikes'
-                # Condition 2 & 3: time-based
-                elif now - last_star >= getattr(self, 'star_hard_limit', 10.0):
-                    # if no recent activity at all, treat as no audio
-                    if last_act is None:
-                        triggered = True
-                        reason = 'no_audio'
-                    else:
-                        # if activity existed but we've been silent for star_timeout, trigger silence
-                        if now - last_act >= getattr(self, 'star_timeout', 10.0):
-                            triggered = True
-                            reason = 'silence_timeout'
-                        else:
-                            # there was activity within the short timeout; decide based on avg dB
-                            avg = avg_db.get(ch, -999.0)
-                            if avg >= getattr(self, 'star_decibel_avg', -60.0):
-                                triggered = True
-                                reason = 'hard_limit'
-                            else:
-                                triggered = False
-                if triggered:
-                    stars_report[ch] = {'time': now, 'reason': reason, 'spike_count': sc}
-                    # reset counters for channel
-                    self._state['spike_count'][ch] = 0
-                    self._state['last_star'][ch] = now
-                    # also reset activity marker
-                    self._state['last_activity'][ch] = None
-            # attach stars to state so status can return them
-            self._state['stars'] = stars_report
 
             # reset per-channel accumulation and spike state (we already prepared `spikes` to return)
             for ch in self.channels:
@@ -292,4 +224,3 @@ class AudioProcessor:
                 # ensure buffers dict has a list for each channel
                 if ch not in self._state['buffers']:
                     self._state['buffers'][ch] = []
-
