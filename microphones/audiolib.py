@@ -1,26 +1,8 @@
 """
-v1_lib.py
+audiolib.py
 Convenience wrapper to use the spike detector as a library from other programs.
 
-Usage example:
-  from v1_lib import LibraryProcessor
-
-  def on_spike(ch, spike, avg_db, noise_db):
-      print('SPIKE', ch, spike, avg_db, noise_db)
-
-  def on_star(ch, star):
-      print('STAR', ch, star)
-
-  lib = LibraryProcessor(device=1, channels=(6,7), spike_threshold_db=4.0)
-  lib.register_spike_callback(on_spike)
-  lib.register_star_callback(on_star)
-  lib.start()
-
-  # run for a while...
-  import time; time.sleep(10)
-  lib.stop()
-
-The wrapper forwards configuration to the existing AudioProcessor defined in `v1_web.py`.
+The wrapper forwards configuration to the existing AudioProcessor defined in `main.py`.
 """
 from typing import Callable, Iterable, Optional
 import threading
@@ -29,7 +11,7 @@ import time
 from main import AudioProcessor
 
 
-class LibraryProcessor:
+class AudioProcessorLib:
     """Wrapper that runs an AudioProcessor and polls it periodically.
 
     Callbacks:
@@ -146,7 +128,7 @@ if __name__ == '__main__':
     def star_print(ch, star):
         print('STAR cb', ch, star)
 
-    lib = LibraryProcessor(device=1, channels=(6,7), spike_threshold_db=4.0)
+    lib = AudioProcessorLib(device=1, channels=(6,7), spike_threshold_db=4.0)
     lib.register_spike_callback(spike_print)
     lib.register_star_callback(star_print)
     lib.start()
