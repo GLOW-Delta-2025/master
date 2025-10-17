@@ -16,7 +16,6 @@ class AudioProcessorLib:
 
     Callbacks:
       - spike callbacks: fn(channel_index, spike_obj, avg_db, noise_db)
-      - star callbacks: fn(channel_index, star_obj)
     """
 
     def __init__(self, *, device: int = 1, channels: Iterable[int] = (6, 7),
@@ -61,9 +60,6 @@ class AudioProcessorLib:
     # callbacks
     def register_spike_callback(self, fn: Callable[[int, dict, float, float], None]):
         self._spike_callbacks.append(fn)
-
-    def register_star_callback(self, fn: Callable[[int, dict], None]):
-        self._star_callbacks.append(fn)
 
     # config helpers
     def config(self, **kwargs):
@@ -125,12 +121,8 @@ if __name__ == '__main__':
     def spike_print(ch, spike, avg, noise):
         print('SPIKE cb', ch, spike, avg, noise)
 
-    def star_print(ch, star):
-        print('STAR cb', ch, star)
-
     lib = AudioProcessorLib(device=1, channels=(6,7), spike_threshold_db=4.0)
     lib.register_spike_callback(spike_print)
-    lib.register_star_callback(star_print)
     lib.start()
     try:
         while True:
