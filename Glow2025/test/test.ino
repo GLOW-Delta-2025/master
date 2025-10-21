@@ -43,6 +43,7 @@ void scheduleDelayedCommand(String source, String command) {
 // Setup
 // =====================================================
 void setup() {
+  delay(2000);
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
