@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 GLOW 25' - Mac Mini Control System (Five Arms, Router-Aware, Robust)
 Audio-reactive lighting control with 5 arms and Teensy router.
@@ -34,15 +34,15 @@ NUM_ARMS = 5
 MAX_STARS_FOR_CLIMAX = 10
 
 PEAK_TIMEOUT = 10.0         # seconds without peaks before auto-send
-STAR_SEND_TIME = 20.0      # total seconds from start before auto-send
+STAR_SEND_TIME = 20.0       # total seconds from start before auto-send
 MAX_BRIGHTNESS = 255
-UPDATE_STEP = 50           # brightness bump per peak
+UPDATE_STEP = 50            # brightness bump per peak
 
-ACK_TIMEOUT = 0.75         # wait for CONFIRM before retrying SEND_STAR
-MAX_SEND_RETRIES = 3       # max SEND_STAR attempts
-ARRIVAL_WARN_AFTER = 8.0   # warn if no STAR_ARRIVED after this many seconds
-ARRIVAL_TIMEOUT = 15.0     # give up on STAR_ARRIVED after this many seconds and reset arm
-WARN_THROTTLE = 2.0        # throttle warnings to at most once per arm per 2 seconds
+ACK_TIMEOUT = 0.75          # wait for CONFIRM before retrying SEND_STAR
+MAX_SEND_RETRIES = 3        # max SEND_STAR attempts
+ARRIVAL_WARN_AFTER = 8.0    # warn if no STAR_ARRIVED after this many seconds
+ARRIVAL_TIMEOUT = 15.0      # give up on STAR_ARRIVED after this many seconds and reset arm
+WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 seconds
 
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
@@ -71,9 +71,10 @@ class RequestType(Enum):
 
 class StarState(Enum):
     IDLE = 0
-    ACTIVE = 1          # building brightness via peaks
-    DISPATCHING = 2     # SEND_STAR sent, waiting for CONFIRM
-    IN_ANIMATION = 3    # CONFIRM received, waiting for STAR_ARRIVED
+    WAIT_CONFIRM = 1      # waiting for CONFIRM:MAKE_STAR
+    ACTIVE = 2            # building brightness via peaks (after MAKE_STAR confirmed)
+    DISPATCHING = 3       # SEND_STAR sent, waiting for CONFIRM
+    IN_ANIMATION = 4      # CONFIRM(SEND_STAR) received, waiting for STAR_ARRIVED
 
 @dataclass
 class Message:
@@ -132,7 +133,7 @@ class MacMiniController:
         self.climax_sent = False
         self._stop = False
 
-        # NEW: pending confirmations for all outgoing requests
+        # pending confirmations for all outgoing requests
         self.pending_confirms: Dict[PendingKey, RequestTracker] = {}
 
         threading.Thread(target=self.receive_loop, daemon=True).start()
@@ -273,11 +274,20 @@ class MacMiniController:
                 print(f"[RECEIVED] (ignored unknown device) {src}")
             return
 
+        # Acknowledge MAKE_STAR -> transition WAIT_CONFIRM -> ACTIVE
+        if verb == "CONFIRM" and cmd == RequestType.MAKE_STAR.value and dev.name.startswith("ARM"):
+            with self.lock:
+                star = self.arms[dev]
+                # clear pending
+                self.pending_confirms.pop((dev.value, cmd), None)
+                if star.state == StarState.WAIT_CONFIRM:
+                    star.state = StarState.ACTIVE
+                    print(f"[ACK] {dev.value} confirmed MAKE_STAR; now ACTIVE")
+            return
+
         # Generic CONFIRM handling: stop retries for this device+cmd
         if verb == "CONFIRM":
-            key: PendingKey = (dev.value, cmd)
-            if key in self.pending_confirms:
-                del self.pending_confirms[key]
+            self.pending_confirms.pop((dev.value, cmd), None)
 
             # Special case: SEND_STAR confirmation advances the arm state
             if cmd == RequestType.SEND_STAR.value and dev.name.startswith("ARM"):
@@ -305,8 +315,7 @@ class MacMiniController:
                 star.last_warn = None
                 print(f"[ACK] {arm.value} confirmed SEND_STAR; waiting for STAR_ARRIVED")
             else:
-                # Duplicate/late confirm — ignore quietly
-                pass
+                pass  # duplicate/late confirm — ignore
 
     def _on_star_arrived(self, arm: DeviceType):
         with self.lock:
@@ -328,8 +337,7 @@ class MacMiniController:
                 # Reset arm for next star
                 self._reset_arm(star)
             else:
-                # Late/stray arrival after abort or reset — ignore silently
-                pass
+                pass  # late/stray arrival after abort or reset — ignore
 
     def _reset_arm(self, star: Star):
         star.state = StarState.IDLE
@@ -350,9 +358,13 @@ class MacMiniController:
         with self.lock:
             star = self.arms[arm]
             now = time.time()
+
+            # DBG: show state and any pending confirms for this arm
+            print(f"[DBG] {arm.value} state={star.state.name}, pending={[k for k in self.pending_confirms.keys() if k[0]==arm.value]}")
+
             if star.state in (StarState.IDLE,):
-                # Start new star
-                star.state = StarState.ACTIVE
+                # Start new star: wait for MAKE_STAR confirm before allowing updates
+                star.state = StarState.WAIT_CONFIRM
                 star.active = True
                 star.brightness = UPDATE_STEP
                 star.start_time = now
@@ -362,12 +374,23 @@ class MacMiniController:
                 star.awaiting_arrival = False
                 self.send_command(Message(RequestType.MAKE_STAR, arm, star.brightness))
                 print(f"[PEAK] New star on {arm.value} (brightness={star.brightness})")
+
+            elif star.state == StarState.WAIT_CONFIRM:
+                # Ignore peaks until MAKE_STAR is confirmed
+                print(f"[PEAK] Ignored: {arm.value} waiting for MAKE_STAR confirm")
+
             elif star.state == StarState.ACTIVE:
+                # EXTRA GUARD: if MAKE_STAR confirm still pending, block updates
+                if (arm.value, RequestType.MAKE_STAR.value) in self.pending_confirms:
+                    print(f"[PEAK] Ignored: {arm.value} MAKE_STAR not yet confirmed (pending ACK)")
+                    return
+
                 # Update existing star
                 star.brightness = min(star.brightness + UPDATE_STEP, MAX_BRIGHTNESS)
                 star.last_peak_time = now
                 self.send_command(Message(RequestType.UPDATE_STAR, arm, star.brightness))
                 print(f"[PEAK] Update {arm.value} -> brightness={star.brightness}")
+
             else:
                 print(f"[PEAK] Ignored: {arm.value} is {star.state.name}")
 
@@ -430,7 +453,6 @@ class MacMiniController:
         self.send_command(Message(RequestType.SEND_STAR, star.arm, star.brightness))
         star.last_send_attempt = time.time()
         star.retry_count += 1
-        # No noisy print here beyond [SEND]
 
     # ---------------- MANUAL INPUT LOOP ----------------
     def input_loop(self):
