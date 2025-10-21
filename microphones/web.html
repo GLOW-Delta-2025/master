@@ -54,6 +54,8 @@
   <div>
     <button id="start">Start</button>
     <button id="stop" disabled>Stop</button>
+    <button id="save">Save</button>
+    <button id="load">Load</button>
   </div>
 
   <h4>Quick tips</h4>
@@ -162,6 +164,44 @@
     wireSlider('alpha_rise', 'alpha_rise', v=>parseFloat(v));
     wireSlider('alpha_decay', 'alpha_decay', v=>parseFloat(v));
     wireSlider('interval', 'interval', v=>parseFloat(v));
+
+    // save button: send channel/device/names/interval to /config
+    document.getElementById('save').addEventListener('click', ()=>{
+      const payload = {
+        device: parseInt(document.getElementById('device').value || '1'),
+        channels: (document.getElementById('channels').value || '6,7').split(',').map(s=>parseInt(s.trim())),
+        names: (document.getElementById('names').value || '').split(',').map(s=>s.trim()),
+        print_interval: parseFloat(document.getElementById('interval').value || '0.5'),
+      };
+      sendConfig(payload);
+      appendLog('Saved config');
+    });
+
+    // load button: fetch current config and populate the form
+    async function loadConfig(){
+      try{
+        const r = await fetch('/config');
+        const j = await r.json();
+        if(!j.ok) return;
+        const cfg = j.config || {};
+        if('device' in cfg) document.getElementById('device').value = cfg.device;
+        if('channels' in cfg) document.getElementById('channels').value = (cfg.channels||[]).join(',');
+        if('names' in cfg) document.getElementById('names').value = (cfg.names||[]).join(',');
+        if('spike_threshold_db' in cfg) document.getElementById('threshold').value = cfg.spike_threshold_db;
+        if('alpha_rise' in cfg) document.getElementById('alpha_rise').value = cfg.alpha_rise;
+        if('alpha_decay' in cfg) document.getElementById('alpha_decay').value = cfg.alpha_decay;
+        if('poll_interval' in cfg) document.getElementById('interval').value = cfg.poll_interval;
+        // update slider displays
+        document.getElementById('threshold_val').textContent = parseFloat(document.getElementById('threshold').value).toFixed(2);
+        document.getElementById('alpha_rise_val').textContent = parseFloat(document.getElementById('alpha_rise').value).toFixed(2);
+        document.getElementById('alpha_decay_val').textContent = parseFloat(document.getElementById('alpha_decay').value).toFixed(2);
+        document.getElementById('interval_val').textContent = parseFloat(document.getElementById('interval').value).toFixed(2);
+      }catch(e){ appendLog('Load error: '+e); }
+    }
+
+    document.getElementById('load').addEventListener('click', loadConfig);
+    // auto-load once on startup
+    loadConfig().catch(()=>{});
   </script>
 </body>
 </html>
