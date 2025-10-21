@@ -1,185 +1,210 @@
-/*
-  Glow 25' Teensy Simulator - 5 Arms
-  Simulates ARM1–ARM5 with proper star creation, updates, and arrival
-  Confirms commands, sends STAR_ARRIVED, and supports idle/max brightness timers
-*/
-
-#define SERIAL_BAUD 115200
-#define MAX_BRIGHTNESS 255
-#define SEND_DELAY_MS 10000       // 10 seconds max timer
-#define IDLE_TIMEOUT_MS 2000      // 2 seconds since last peak
+// =====================================================
+// Teensy / Arduino Firmware v4 (parallel delayed commands)
+// Handles any [SOURCE]:REQUEST:[COMMAND]{params} format
+// Delayed responses: STAR_ARRIVED & CLIMAX_READY
+// Multiple delayed commands can run in parallel
+// =====================================================
 
 #include <Arduino.h>
 
 String inputBuffer = "";
+bool messageStarted = false;
+const int LED_PIN = LED_BUILTIN;
 
-struct ArmState {
-  bool active = false;
-  int brightness = 0;
-  unsigned long startTime = 0;      // when MAKE_STAR started
-  unsigned long lastPeakTime = 0;   // last UPDATE_STAR time
+struct DelayedCommand {
+  String source;
+  String command;              // STAR_ARRIVED or CLIMAX_READY
+  unsigned long triggerTime;   // millis() when it should be sent
+  bool active;
 };
 
-ArmState arms[5];
+const int MAX_DELAYED = 10;
+DelayedCommand delayed[MAX_DELAYED];
 
-void setup() {
-  Serial.begin(SERIAL_BAUD);
-  while (!Serial); // wait for serial connection
-  Serial.println("Glow25 Teensy Simulator Ready");
-
-  // initialize all arms
-  for (int i = 0; i < 5; i++) {
-    arms[i] = ArmState();
+// =====================================================
+// Helper function to schedule delayed commands
+// =====================================================
+void scheduleDelayedCommand(String source, String command) {
+  for (int i = 0; i < MAX_DELAYED; i++) {
+    if (!delayed[i].active) {
+      delayed[i].source = source;
+      delayed[i].command = command;
+      delayed[i].triggerTime = millis() + random(5000, 8000);  // 5–8 seconds
+      delayed[i].active = true;
+      return;
+    }
   }
+
+  // Overflow protection
+  Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{too_many_delayed_commands}##");
 }
 
+// =====================================================
+// Setup
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  randomSeed(analogRead(0));
+
+  // Initialize delayed commands array
+  for (int i = 0; i < MAX_DELAYED; i++) delayed[i].active = false;
+}
+
+// =====================================================
+// Main loop
+// =====================================================
 void loop() {
-  readSerialMessages();
-  checkArmsTimers();
-}
-
-void readSerialMessages() {
+  // --- Handle incoming serial data ---
   while (Serial.available() > 0) {
     char c = Serial.read();
-    inputBuffer += c;
 
-    // detect full message (!! ... ##)
-    if (inputBuffer.endsWith("##")) {
-      String msg = inputBuffer;
-      inputBuffer = "";
-      handleMessage(msg);
+    if (c == '!' && !messageStarted) {
+      messageStarted = true;
+      inputBuffer = "!!";
+    } else if (messageStarted) {
+      inputBuffer += c;
+
+      if (inputBuffer.endsWith("##")) {
+        handleMessage(inputBuffer);
+        inputBuffer = "";
+        messageStarted = false;
+      }
+
+      if (inputBuffer.length() > 256) {
+        Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{overflow}##");
+        inputBuffer = "";
+        messageStarted = false;
+      }
+    }
+  }
+
+  // --- Handle delayed commands ---
+  unsigned long now = millis();
+  for (int i = 0; i < MAX_DELAYED; i++) {
+    if (delayed[i].active && now >= delayed[i].triggerTime) {
+      sendConfirm(delayed[i].source, delayed[i].command);
+      delayed[i].active = false;  // deactivate
     }
   }
 }
 
+// =====================================================
+// Handle and parse full message (2-colon version)
+// =====================================================
 void handleMessage(String msg) {
   msg.trim();
-  if (!msg.startsWith("!!")) return;
 
-  int start = msg.indexOf('[');
-  int end = msg.indexOf(']');
-  if (start == -1 || end == -1) return;
-
-  String target = msg.substring(start + 1, end);
-  String request = extractRequestType(msg);
-  int armIndex = getArmIndex(target);
-  if (request == "" || armIndex < 0) return;
-
-  // Send confirm once
-  sendConfirm(target, request);
-
-  // Handle commands
-  if (request == "MAKE_STAR") {
-    if (!arms[armIndex].active) {
-      arms[armIndex].active = true;
-      arms[armIndex].brightness = 0;
-      arms[armIndex].startTime = millis();
-      arms[armIndex].lastPeakTime = millis();
-    }
+  if (!msg.startsWith("!!") || !msg.endsWith("##")) {
+    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{invalid_format}##");
+    return;
   }
-  else if (request == "UPDATE_STAR") {
-    if (arms[armIndex].active) {
-      int newBrightness = extractBrightness(msg);
-      arms[armIndex].brightness = min(newBrightness, MAX_BRIGHTNESS);
-      arms[armIndex].lastPeakTime = millis();
-    }
+
+  msg.remove(0, 2);
+  msg.remove(msg.length() - 2, 2);
+
+  int c1 = msg.indexOf(':');
+  int c2 = msg.indexOf(':', c1 + 1);
+
+  if (c1 < 0 || c2 < 0) {
+    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{bad_structure}##");
+    return;
   }
-  else if (request == "SEND_STAR") {
-    // manually trigger star send
-    if (arms[armIndex].active) {
-      sendStarArrived(target);
-      arms[armIndex].active = false;
-      arms[armIndex].brightness = 0;
+
+  String source = msg.substring(0, c1);
+  if (source.startsWith("!")) source.remove(0, 1);
+
+  String maybeType = msg.substring(c1 + 1, c2);
+  String command = msg.substring(c2 + 1);
+
+  int bracePos = command.indexOf('{');
+  if (bracePos >= 0) command = command.substring(0, bracePos);
+  command.trim();
+
+
+  if (maybeType.equalsIgnoreCase("REQUEST")) {
+    String devices[] = {"ARM1", "ARM2", "ARM3", "ARM4", "ARM5", "CENTER", "TOP"};
+
+    // Schedule delayed commands if needed
+    if (command.equalsIgnoreCase("SEND_STAR")) {
+      if (source.equalsIgnoreCase("BROADCAST")) {
+        for (int i = 0; i < 7; i++) scheduleDelayedCommand(devices[i], "STAR_ARRIVED");
+      } else {
+        scheduleDelayedCommand(source, "STAR_ARRIVED");
+      }
     }
+
+    // Always send immediate confirm
+    if (source.equalsIgnoreCase("BROADCAST")) {
+      for (int i = 0; i < 7; i++) sendConfirm(devices[i], command);
+    } else {
+      sendConfirm(source, command);
+    }
+  } else {
+    Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{unknown_type_" + maybeType + "}##");
   }
 }
 
-String extractRequestType(String msg) {
-  int secondColon = msg.indexOf(':', msg.indexOf(':') + 1);
-  if (secondColon == -1) return "";
+// =====================================================
+// Visual blink feedback
+// =====================================================
 
-  int endPos = msg.indexOf('##', secondColon);
-  if (endPos == -1) endPos = msg.length();
 
-  String part = msg.substring(secondColon + 1, endPos);
-  part.replace("##", "");
-  part.trim();
+// =====================================================
+// Generate proper CONFIRM messages including SOURCE
+// =====================================================
+void sendConfirm(String source, String command) {
+  String msg = "!!" + source + ":MASTER:CONFIRM:";
 
-  int brace = part.indexOf('{');
-  if (brace != -1) part = part.substring(0, brace);
-
-  int bracket = part.indexOf('[');
-  if (bracket != -1) part = part.substring(0, bracket);
-
-  part.trim();
-  return part;
-}
-
-int extractBrightness(String msg) {
-  int first = msg.indexOf('[');
-  int last = msg.lastIndexOf(']');
-  if (first == -1 || last == -1) return 0;
-
-  String params = msg.substring(first, last + 1);
-  int count = 0;
-  int start = 0;
-  while (true) {
-    int open = params.indexOf('[', start);
-    if (open == -1) break;
-    int close = params.indexOf(']', open);
-    if (close == -1) break;
-
-    count++;
-    if (count == 3) return params.substring(open + 1, close).toInt();
-    start = close + 1;
+  if (command.equalsIgnoreCase("MAKE_STAR")) {
+    msg += "MAKE_STAR##";
+  } else if (command.equalsIgnoreCase("SEND_STAR")) {
+    msg += "SEND_STAR##";
+  } else if (command.equalsIgnoreCase("CANCEL_STAR")) {
+    msg += "CANCEL_STAR##";
+  } else if (command.equalsIgnoreCase("STAR_ARRIVED")) {
+    msg = "!!" + source + ":MASTER:REQUEST:";
+    msg += "STAR_ARRIVED{";
+    msg += "SPEED=" + String(random(10, 100)) + ",";
+    msg += "COLOR=" + String(random(0, 255)) + ",";
+    msg += "BRIGHTNESS=" + String(random(50, 255)) + ",";
+    msg += "SIZE=" + String(random(1, 10)) + "}##";
+  } else if (command.equalsIgnoreCase("ADD_STAR")) {
+    msg += "ADD_STAR##";
+  } else if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER")) {
+    msg += "BUILDUP_CLIMAX_CENTER{SPEED=" + String(random(50, 200)) + "}##";
+  } else if (command.equalsIgnoreCase("CLIMAX_READY")) {
+    msg += "CLIMAX_READY##";
+  } else if (command.equalsIgnoreCase("START_CLIMAX_CENTER")) {
+    msg += "START_CLIMAX_CENTER{TIME=" + String(random(1000, 5000)) + "}##";
+  } else if (command.equalsIgnoreCase("START_CLIMAX_TOP")) {
+    msg += "START_CLIMAX_TOP{TIME=" + String(random(1000, 5000)) + "}##";
+  } else if (command.equalsIgnoreCase("STOP_CLIMAX_CENTER")) {
+    msg += "STOP_CLIMAX_CENTER##";
+  } else if (command.equalsIgnoreCase("STOP_CLIMAX_TOP")) {
+    msg += "STOP_CLIMAX_TOP##";
+  } else if (command.equalsIgnoreCase("START_IDLE")) {
+    msg += "START_IDLE##";
+  } else if (command.equalsIgnoreCase("STOP_IDLE")) {
+    msg += "STOP_IDLE##";
+  } else if (command.equalsIgnoreCase("PING")) {
+    msg += "PING##";
+  } else if (command.equalsIgnoreCase("RESET")) {
+    msg += "RESET##";
+  } else if (command.equalsIgnoreCase("COMM_ERROR")) {
+    msg += "COMM_ERROR{STRING=Random_Comm_Error_" + String(random(100, 999)) + "}##";
+  } 
+  // ------------------------------
+  // NEW: UPDATE_STAR confirm branch
+  // ------------------------------
+  else if (command.equalsIgnoreCase("UPDATE_STAR")) {
+    msg += "UPDATE_STAR##";
   }
-  return 0;
-}
-
-int getArmIndex(String target) {
-  if (target.startsWith("ARM")) {
-    int num = target.substring(3).toInt();
-    if (num >= 1 && num <= 5) return num - 1;
+  // ------------------------------
+  else {
+    msg = "!!" + source + ":MASTER:REQUEST:ERROR:{unknown_command_" + command + "}##";
   }
-  return -1;
-}
 
-void sendConfirm(String target, String request) {
-  String response = "!!" + target + ":[MASTER]:CONFIRM:" + request + "##";
-  Serial.println(response);
-}
-
-void sendStarArrived(String target) {
-  String response = "!!" + target + ":[MASTER]:REQUEST:STAR_ARRIVED##";
-  Serial.println(response);
-}
-
-void checkArmsTimers() {
-  unsigned long now = millis();
-  for (int i = 0; i < 5; i++) {
-    if (!arms[i].active) continue;
-
-    // Send star if max brightness reached
-    if (arms[i].brightness >= MAX_BRIGHTNESS) {
-      sendStarArrived("ARM" + String(i + 1));
-      arms[i].active = false;
-      arms[i].brightness = 0;
-      continue;
-    }
-
-    // Send star if idle for 2s
-    if ((now - arms[i].lastPeakTime) > IDLE_TIMEOUT_MS) {
-      sendStarArrived("ARM" + String(i + 1));
-      arms[i].active = false;
-      arms[i].brightness = 0;
-      continue;
-    }
-
-    // Send star if 10s elapsed since MAKE_STAR
-    if ((now - arms[i].startTime) > SEND_DELAY_MS) {
-      sendStarArrived("ARM" + String(i + 1));
-      arms[i].active = false;
-      arms[i].brightness = 0;
-    }
-  }
+  Serial.println(msg);
 }
