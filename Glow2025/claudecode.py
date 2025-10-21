@@ -173,23 +173,41 @@ class MacMiniController:
         s = frame.strip()
         if not (s.startswith("!!") and s.endswith("##")):
             return None
-        core = s[2:-2]
-        parts = core.split(":")
 
+        # Strip delimiters
+        core = s[2:-2]
+
+        # Remove control whitespace that can appear mid-token (serial wrap)
+        core = core.replace("\r", "").replace("\n", "").replace("\t", "")
+
+        # Split and trim parts
+        parts = [p.strip() for p in core.split(":")]
         if len(parts) < 4:
             return None
 
-        src, dest, verb = parts[0], parts[1], parts[2]
-        cmd_and_payload = ":".join(parts[3:])
+        src_raw, dest_raw, verb_raw = parts[0], parts[1], parts[2]
+        cmd_and_payload = ":".join(parts[3:]).strip()
 
-        if "{" in cmd_and_payload:
-            try:
-                cmd, rest = cmd_and_payload.split("{", 1)
-                payload = rest.rsplit("}", 1)[0]
-            except Exception:
-                cmd, payload = cmd_and_payload, None
+        # Extract command and optional payload (accept "{...}" or "{[...]}"), payload optional
+        payload = None
+        lb = cmd_and_payload.find("{")
+        if lb != -1:
+            cmd_raw = cmd_and_payload[:lb].strip()
+            right = cmd_and_payload[lb + 1 :]
+            if right.endswith("}"):
+                right = right[:-1]
+            payload = right.strip()
         else:
-            cmd, payload = cmd_and_payload, None
+            cmd_raw = cmd_and_payload.strip()
+
+        # Normalize verb/cmd: uppercase and remove internal spaces
+        verb = verb_raw.replace(" ", "").upper()
+        cmd = cmd_raw.replace(" ", "").upper()
+
+        # Wrap addresses in brackets so the existing _norm_addr (which slices ends)
+        # yields correct tokens (ARM1, MASTER) without changing that function.
+        src = f"[{src_raw}]"
+        dest = f"[{dest_raw}]"
 
         return src, dest, verb, cmd, payload
 
