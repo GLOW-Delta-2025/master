@@ -4,14 +4,26 @@ import threading
 import time
 import sounddevice as sd
 import numpy as np
+from typing import Iterable, Optional
+
+# try to load configuration helper; if missing, fall back to built-in defaults
+try:
+    from config import get_config
+except Exception:
+    def get_config():
+        return {}
 
 class AudioProcessor:
-    def __init__(self, device=1, channels=(6, 7), samplerate=48000,
-                 spike_threshold_db=6.0, noise_init_db=-50.0,
-                 alpha_rise=0.95, alpha_decay=0.6,
-                 same_source_corr=0.75,
-                 min_dB_delta=4.0,
-                 max_delay_ms=10.0):
+    def __init__(self, device: int = 2,
+                 channels: Iterable[int] = (6, 7),
+                 samplerate: int = 48000,
+                 spike_threshold_db: float = 6.0,
+                 noise_init_db: float = -50.0,
+                 alpha_rise: float = 0.95,
+                 alpha_decay: float = 0.6,
+                 same_source_corr: float = 0.75,
+                 min_dB_delta: float = 4.0,
+                 max_delay_ms: float = 10.0):
         self.device = device
         self.channels = tuple(channels)
         self.samplerate = samplerate
@@ -60,6 +72,31 @@ class AudioProcessor:
                                      callback=self._cb)
         self.stream.start()
         self.running = True
+
+    @classmethod
+    def from_config(cls, cfg: Optional[dict] = None):
+        """Construct AudioProcessor from a config dict (as returned by `get_config`).
+
+        This is a convenience that maps commonly-used keys to constructor args.
+        """
+        if cfg is None:
+            cfg = get_config()
+        # map keys with sensible fallbacks
+        device = int(cfg.get('device', 2))
+        channels = tuple(cfg.get('channels', (6, 7)))
+        samplerate = int(cfg.get('samplerate', 48000))
+        spike_threshold_db = float(cfg.get('spike_threshold_db', 6.0))
+        noise_init_db = float(cfg.get('noise_init_db', -50.0))
+        alpha_rise = float(cfg.get('alpha_rise', 0.95))
+        alpha_decay = float(cfg.get('alpha_decay', 0.6))
+        same_source_corr = float(cfg.get('same_source_corr', 0.75))
+        min_dB_delta = float(cfg.get('min_dB_delta', 4.0))
+        max_delay_ms = float(cfg.get('max_delay_ms', 10.0))
+        return cls(device=device, channels=channels, samplerate=samplerate,
+                   spike_threshold_db=spike_threshold_db, noise_init_db=noise_init_db,
+                   alpha_rise=alpha_rise, alpha_decay=alpha_decay,
+                   same_source_corr=same_source_corr, min_dB_delta=min_dB_delta,
+                   max_delay_ms=max_delay_ms)
 
     def stop(self):
         if self.stream:
