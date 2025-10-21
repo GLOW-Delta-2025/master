@@ -1,0 +1,16 @@
+{
+  "device": 2,
+  "channels": [
+    4,
+    7
+  ],
+  "samplerate": 48000,
+  "spike_threshold_db": 5.0,
+  "alpha_rise": 0.89,
+  "alpha_decay": 0.48,
+  "names": [
+    "Ch1",
+    "Ch2"
+  ],
+  "poll_interval": 0.5
+}
