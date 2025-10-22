@@ -40,7 +40,7 @@ NUM_ARMS = 5
 MAX_STARS_FOR_CLIMAX = 10
 
 PEAK_TIMEOUT = 10.0         # seconds without peaks before auto-send
-STAR_SEND_TIME = 20.0       # total seconds from start (after MAKE_STAR confirm) before auto-send
+STAR_SEND_TIME = 20.0       # seconds from MAKE_STAR confirm before auto-send
 MAX_BRIGHTNESS = 255
 UPDATE_STEP = 50            # brightness bump per peak
 
@@ -52,6 +52,7 @@ WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 se
 
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
+VERSION = "2025-10-22-CLIMAX-RESET-FIX-RLOCK"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -78,12 +79,12 @@ class RequestType(Enum):
     ADD_STAR_CENTER = "ADD_STAR_CENTER"
 
     # Climax flow
-    BUILDUP_CLIMAX_CENTER = "BUILDUP_CLIMAX_CENTER"  # we send to CENTER
-    CLIMAX_READY = "CLIMAX_READY"                    # REQUEST from CENTER
-    START_CLIMAX_CENTER = "START_CLIMAX_CENTER"      # we send to CENTER
-    START_CLIMAX_TOP = "START_CLIMAX_TOP"            # we send to TOP
-    CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # REQUEST from CENTER
-    CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # REQUEST from TOP
+    BUILDUP_CLIMAX_CENTER = "BUILDUP_CLIMAX_CENTER"  # Mac → CENTER
+    CLIMAX_READY = "CLIMAX_READY"                    # CENTER → Mac (REQUEST)
+    START_CLIMAX_CENTER = "START_CLIMAX_CENTER"      # Mac → CENTER
+    START_CLIMAX_TOP = "START_CLIMAX_TOP"            # Mac → TOP
+    CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # CENTER → Mac (REQUEST)
+    CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # TOP → Mac (REQUEST)
 
 class StarState(Enum):
     IDLE = 0
@@ -117,6 +118,7 @@ class Star:
         self.arm = arm
         self.state = StarState.IDLE
         self.active = False
+               # brightness set by peaks
         self.brightness = 0
         self.start_time: Optional[float] = None
         self.last_peak_time: Optional[float] = None
@@ -144,12 +146,15 @@ PendingKey = Tup[str, str]  # (device.value, request_type.value)
 
 class MacMiniController:
     def __init__(self):
+        print("[BOOT] Running file:", __file__, "version:", VERSION)
         self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
         time.sleep(2)
         print(f"[SERIAL] Connected to Teensy on {SERIAL_PORT}")
 
         self.arms = {arm: Star(arm) for arm in ARMS}
-        self.lock = threading.Lock()
+
+        # >>> RLock to avoid deadlocks when helpers call helpers under the same lock
+        self.lock = threading.RLock()
 
         self.stars_collected = 0
 
@@ -166,10 +171,15 @@ class MacMiniController:
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
         print("[MAC MINI] Initialized - Manual 5 ARM control ready")
-        print("[TEST] Press keys 1–5 to trigger peaks for respective arms. Ctrl+C to exit.")
+        print("[TEST] Press keys 1–5 to trigger peaks for respective arms. 'R' to manual-reset. Ctrl+C to exit.")
 
     # ---------------- SEND COMMANDS ----------------
     def send_command(self, msg: Message):
+        # Safety rail: Mac must never send CLIMAX_READY
+        if msg.request_type == RequestType.CLIMAX_READY:
+            print("[BUGGUARD] Refusing to send CLIMAX_READY from Mac. Expected as incoming CENTER event.")
+            return
+
         cmd = msg.to_command()
         try:
             self.serial.write(cmd.encode('utf-8'))
@@ -362,9 +372,15 @@ class MacMiniController:
     # ---------------- CLIMAX COMPLETION CHECK ----------------
     def _check_climax_completion(self):
         """Reset the show only when both CENTER and TOP report done."""
-        if self.climax_done_center and self.climax_done_top:
+        both = self.climax_done_center and self.climax_done_top
+        if both:
+            print("[CLIMAX] Both CENTER and TOP done → resetting show state…")
             self._reset_show_cycle()
-            print("[CLIMAX] Both CENTER and TOP done → show state reset (ready for new cycle).")
+            # Snapshot after reset so we know peaks should work
+            print(f"[RESET] stars_collected={self.stars_collected} "
+                  f"climax_state={self.climax_state.name} "
+                  f"pending_confirms={len(self.pending_confirms)}")
+            print("[CLIMAX] Show state reset (ready for new cycle).")
         else:
             waiting = []
             if not self.climax_done_center:
@@ -571,11 +587,17 @@ class MacMiniController:
         try:
             while True:
                 key = get_key()
-                if key and key.isdigit():
+                if not key:
+                    continue
+                if key.isdigit():
                     n = int(key)
                     if 1 <= n <= NUM_ARMS:
                         self.trigger_peak(n)
                         print(f"[KEY] Peak for ARM{n}")
+                elif key in ("r", "R"):
+                    with self.lock:
+                        self._reset_show_cycle()
+                    print("[DEV] Manual reset via keyboard.")
         except KeyboardInterrupt:
             self.shutdown()
 
