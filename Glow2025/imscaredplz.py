@@ -4,19 +4,25 @@ GLOW 25' - Mac Mini Control System (Five Arms, Router-Aware, Robust)
 Audio-reactive lighting control with 5 arms and Teensy router.
 
 Protocol expectations (as seen by the Mac Mini):
-- Outgoing (we send):            !![ARM#]:REQUEST:<CMD>{[...]}##
-  (Router will forward as):      !!MASTER:[ARM#]:REQUEST:<CMD>{[...]}##
-- Incoming CONFIRM from arm:     !![ARM#]:MASTER:CONFIRM:<CMD>##
-- Incoming arrival event:        !![ARM#]:MASTER:REQUEST:STAR_ARRIVED##
+- Outgoing (we send):            !![DEVICE]:REQUEST:<CMD>{...}##
+  (Router will forward as):      !!MASTER:[DEVICE]:REQUEST:<CMD>{...}##
+- Incoming CONFIRM from device:  !![DEVICE]:MASTER:CONFIRM:<CMD>##
+- Incoming events to master:     !![DEVICE]:MASTER:REQUEST:<EVENT>##
 
 Behavior:
 - Peaks (keys 1–5) create/update a star on the corresponding arm.
 - When conditions hit, we SEND_STAR and wait for CONFIRM with retries (ACK_TIMEOUT).
 - Only after STAR_ARRIVED do we count the star and update TOP & CENTER.
-- Robustness:
-  * Throttled warnings for long animations
-  * Hard timeout to reset an arm if STAR_ARRIVED never comes
-  * Idempotent handlers (ignore duplicates/late messages safely)
+- When stars_collected >= MAX_STARS_FOR_CLIMAX:
+    * Send BUILDUP_CLIMAX_CENTER (retry/confirm).
+    * Wait for CLIMAX_READY from CENTER, then send START_CLIMAX_CENTER & START_CLIMAX_TOP.
+    * Arms are disabled during buildup/climax.
+    * Wait for BOTH CLIMAX_DONE_CENTER and CLIMAX_DONE_TOP, then reset the whole show state.
+
+Robustness:
+- Generic confirm/retry engine for ALL requests (with MAX_SEND_RETRIES).
+- WARN if STAR_ARRIVED takes too long; ERROR & reset if it never comes.
+- Idempotent handlers (ignore duplicates/late messages safely).
 """
 
 import time
@@ -34,12 +40,12 @@ NUM_ARMS = 5
 MAX_STARS_FOR_CLIMAX = 10
 
 PEAK_TIMEOUT = 10.0         # seconds without peaks before auto-send
-STAR_SEND_TIME = 20.0       # total seconds from start before auto-send
+STAR_SEND_TIME = 20.0       # total seconds from start (after MAKE_STAR confirm) before auto-send
 MAX_BRIGHTNESS = 255
 UPDATE_STEP = 50            # brightness bump per peak
 
-ACK_TIMEOUT = 0.75          # wait for CONFIRM before retrying SEND_STAR
-MAX_SEND_RETRIES = 3        # max SEND_STAR attempts
+ACK_TIMEOUT = 0.75          # wait for CONFIRM before retrying any command
+MAX_SEND_RETRIES = 3        # max attempts for any command
 ARRIVAL_WARN_AFTER = 8.0    # warn if no STAR_ARRIVED after this many seconds
 ARRIVAL_TIMEOUT = 15.0      # give up on STAR_ARRIVED after this many seconds and reset arm
 WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 seconds
@@ -61,20 +67,36 @@ class DeviceType(Enum):
 ARMS = [DeviceType[f"ARM{i}"] for i in range(1, NUM_ARMS + 1)]
 
 class RequestType(Enum):
+    # Star flow
     MAKE_STAR = "MAKE_STAR"
     UPDATE_STAR = "UPDATE_STAR"
     SEND_STAR = "SEND_STAR"
     STAR_ARRIVED = "STAR_ARRIVED"
-    CLIMAX_READY = "CLIMAX_READY"
+
+    # Star count visuals
     ADD_STAR_TOP = "ADD_STAR_TOP"
     ADD_STAR_CENTER = "ADD_STAR_CENTER"
+
+    # Climax flow
+    BUILDUP_CLIMAX_CENTER = "BUILDUP_CLIMAX_CENTER"  # we send to CENTER
+    CLIMAX_READY = "CLIMAX_READY"                    # REQUEST from CENTER
+    START_CLIMAX_CENTER = "START_CLIMAX_CENTER"      # we send to CENTER
+    START_CLIMAX_TOP = "START_CLIMAX_TOP"            # we send to TOP
+    CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # REQUEST from CENTER
+    CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # REQUEST from TOP
 
 class StarState(Enum):
     IDLE = 0
     WAIT_CONFIRM = 1      # waiting for CONFIRM:MAKE_STAR
     ACTIVE = 2            # building brightness via peaks (after MAKE_STAR confirmed)
-    DISPATCHING = 3       # SEND_STAR sent, waiting for CONFIRM
+    DISPATCHING = 3       # SEND_STAR sent (via retry engine), waiting for CONFIRM
     IN_ANIMATION = 4      # CONFIRM(SEND_STAR) received, waiting for STAR_ARRIVED
+
+class ClimaxState(Enum):
+    IDLE = 0
+    BUILDUP_WAIT_ACK = 1      # sent BUILDUP_CLIMAX_CENTER, waiting for CONFIRM
+    BUILDUP_WAIT_READY = 2    # waiting for REQUEST:CLIMAX_READY (from CENTER)
+    RUNNING = 3               # after START_* has been sent
 
 @dataclass
 class Message:
@@ -83,7 +105,7 @@ class Message:
     brightness: Optional[int] = None
 
     def to_command(self) -> str:
-        # We send: "!!ARM#:REQUEST:<CMD>{[BRIGHTNESS]}##"
+        # We send: "!!DEVICE:REQUEST:<CMD>{BRIGHTNESS?}##"
         cmd = f"!!{self.target_device.value}:REQUEST:{self.request_type.value}"
         if self.brightness is not None:
             cmd += f"{{{self.brightness}}}"
@@ -130,7 +152,12 @@ class MacMiniController:
         self.lock = threading.Lock()
 
         self.stars_collected = 0
-        self.climax_sent = False
+
+        # Climax control
+        self.climax_state = ClimaxState.IDLE
+        self.climax_done_center = False
+        self.climax_done_top = False
+
         self._stop = False
 
         # pending confirmations for all outgoing requests
@@ -196,8 +223,8 @@ class MacMiniController:
         Require: src:dest:verb:command{[payload]?}
         Returns (src, dest, verb, cmd, payload) or None if invalid.
         Examples:
-          !![ARM3]:MASTER:CONFIRM:SEND_STAR##
-          !![ARM3]:MASTER:REQUEST:STAR_ARRIVED##
+          !!ARM3:MASTER:CONFIRM:SEND_STAR##
+          !!ARM3:MASTER:REQUEST:STAR_ARRIVED##
         """
         s = frame.strip()
         if not (s.startswith("!!") and s.endswith("##")):
@@ -229,12 +256,11 @@ class MacMiniController:
         else:
             cmd_raw = cmd_and_payload.strip()
 
-        # Normalize verb/cmd: uppercase and remove internal spaces
+        # Normalize
         verb = verb_raw.replace(" ", "").upper()
         cmd = cmd_raw.replace(" ", "").upper()
 
-        # Wrap addresses in brackets so the existing _norm_addr (which slices ends)
-        # yields correct tokens (ARM1, MASTER) without changing that function.
+        # Preserve addresses
         src = f"[{src_raw}]"
         dest = f"[{dest_raw}]"
 
@@ -249,6 +275,7 @@ class MacMiniController:
             t = t[1:-1]
         return t
 
+    # ---------------- HANDLE RECEIVED ----------------
     def handle_received(self, frame: str):
         parsed = self._parse_frame(frame)
         if not parsed:
@@ -260,7 +287,6 @@ class MacMiniController:
         src = self._norm_addr(src)
         dest = self._norm_addr(dest)
 
-        # Accept CONFIRMs/REQUESTs from any known device to MASTER (ARMx/TOP/CENTER)
         if not (src and dest == "MASTER"):
             if DEBUG_FRAMES:
                 print(f"[RECEIVED] (ignored) src={src} dest={dest} verb={verb} cmd={cmd} payload={payload}")
@@ -274,40 +300,80 @@ class MacMiniController:
                 print(f"[RECEIVED] (ignored unknown device) {src}")
             return
 
-        # Acknowledge MAKE_STAR -> transition WAIT_CONFIRM -> ACTIVE
+        # ---- MAKE_STAR ACK (starts the star build timers) ----
         if verb == "CONFIRM" and cmd == RequestType.MAKE_STAR.value and dev.name.startswith("ARM"):
             with self.lock:
                 star = self.arms[dev]
-                # clear pending
-                self.pending_confirms.pop((dev.value, cmd), None)
+                # clear pending for this confirm
+                self.pending_confirms.pop((dev.value, RequestType.MAKE_STAR.value), None)
                 if star.state == StarState.WAIT_CONFIRM:
-                    # CHANGED: start timers on confirm (not on first peak)
                     now = time.time()
                     star.state = StarState.ACTIVE
-                    star.start_time = now            # ← timer starts here
-                    star.last_peak_time = now        # ← reset idle timer here too
+                    star.start_time = now     # start timer only after confirm
+                    star.last_peak_time = now
                     print(f"[ACK] {dev.value} confirmed MAKE_STAR; now ACTIVE")
             return
 
-        # Generic CONFIRM handling: stop retries for this device+cmd
+        # ---- Generic CONFIRM handling (stop retries) ----
         if verb == "CONFIRM":
             self.pending_confirms.pop((dev.value, cmd), None)
 
-            # Special case: SEND_STAR confirmation advances the arm state
+            # SEND_STAR confirmation advances the arm state
             if cmd == RequestType.SEND_STAR.value and dev.name.startswith("ARM"):
                 self._on_confirm_send_star(dev)
             return
 
-        # Arrival event only matters for ARMs
+        # ---- STAR_ARRIVED from an ARM ----
         if verb == "REQUEST" and cmd == RequestType.STAR_ARRIVED.value and dev.name.startswith("ARM"):
             self._on_star_arrived(dev)
+            return
+
+        # ---- CLIMAX_READY from CENTER ----
+        if verb == "REQUEST" and cmd == RequestType.CLIMAX_READY.value and dev == DeviceType.CENTER:
+            with self.lock:
+                if self.climax_state == ClimaxState.BUILDUP_WAIT_READY:
+                    # Fire both START commands (retry/confirm handled generically)
+                    self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER))
+                    self.send_command(Message(RequestType.START_CLIMAX_TOP, DeviceType.TOP))
+                    self.climax_state = ClimaxState.RUNNING
+                    print("[CLIMAX] CLIMAX_READY received → START_CLIMAX_CENTER & START_CLIMAX_TOP sent.")
+            return
+
+        # ---- CLIMAX_DONE_CENTER from CENTER ----
+        if verb == "REQUEST" and cmd == RequestType.CLIMAX_DONE_CENTER.value and dev == DeviceType.CENTER:
+            with self.lock:
+                self.climax_done_center = True
+                print("[CLIMAX] CENTER reports CLIMAX_DONE_CENTER.")
+                self._check_climax_completion()
+            return
+
+        # ---- CLIMAX_DONE_TOP from TOP ----
+        if verb == "REQUEST" and cmd == RequestType.CLIMAX_DONE_TOP.value and dev == DeviceType.TOP:
+            with self.lock:
+                self.climax_done_top = True
+                print("[CLIMAX] TOP reports CLIMAX_DONE_TOP.")
+                self._check_climax_completion()
             return
 
         # Silently ignore others
         if DEBUG_FRAMES:
             print(f"[RECEIVED] (ignored) {src}->{dest} {verb}:{cmd}")
 
-    # ---- CONFIRM & ARRIVAL HANDLERS ----
+    # ---------------- CLIMAX COMPLETION CHECK ----------------
+    def _check_climax_completion(self):
+        """Reset the show only when both CENTER and TOP report done."""
+        if self.climax_done_center and self.climax_done_top:
+            self._reset_show_cycle()
+            print("[CLIMAX] Both CENTER and TOP done → show state reset (ready for new cycle).")
+        else:
+            waiting = []
+            if not self.climax_done_center:
+                waiting.append("CENTER")
+            if not self.climax_done_top:
+                waiting.append("TOP")
+            print(f"[CLIMAX] Waiting for: {', '.join(waiting)}…")
+
+    # ---------------- CONFIRM & ARRIVAL HANDLERS ----------------
     def _on_confirm_send_star(self, arm: DeviceType):
         with self.lock:
             star = self.arms[arm]
@@ -318,31 +384,35 @@ class MacMiniController:
                 star.confirmed_at = time.time()
                 star.last_warn = None
                 print(f"[ACK] {arm.value} confirmed SEND_STAR; waiting for STAR_ARRIVED")
-            else:
-                pass  # duplicate/late confirm — ignore
+            # else: duplicate/late confirm — ignore
 
     def _on_star_arrived(self, arm: DeviceType):
         with self.lock:
             star = self.arms[arm]
             if star.state in (StarState.IN_ANIMATION, StarState.DISPATCHING):
-                # Normal success path
                 star.awaiting_arrival = False
-                self.stars_collected += 1
-                print(f"[ARRIVED] {arm.value} animation complete. Total stars: {self.stars_collected}")
 
-                self.send_command(Message(RequestType.ADD_STAR_TOP, DeviceType.TOP))
-                self.send_command(Message(RequestType.ADD_STAR_CENTER, DeviceType.CENTER))
+                if self.climax_state == ClimaxState.IDLE:
+                    # Normal counting + visuals only while not in buildup/climax
+                    self.stars_collected += 1
+                    print(f"[ARRIVED] {arm.value} animation complete. Total stars: {self.stars_collected}")
 
-                if not self.climax_sent and self.stars_collected >= MAX_STARS_FOR_CLIMAX:
-                    self.send_command(Message(RequestType.CLIMAX_READY, DeviceType.MASTER))
-                    self.climax_sent = True
-                    print(f"[CLIMAX] {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached. CLIMAX_READY sent.")
+                    self.send_command(Message(RequestType.ADD_STAR_TOP, DeviceType.TOP))
+                    self.send_command(Message(RequestType.ADD_STAR_CENTER, DeviceType.CENTER))
 
-                # Reset arm for next star
+                    # Trigger pre-climax when threshold reached
+                    if self.stars_collected >= MAX_STARS_FOR_CLIMAX:
+                        self.send_command(Message(RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER))
+                        self.climax_state = ClimaxState.BUILDUP_WAIT_ACK
+                        print(f"[CLIMAX] Threshold {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached → BUILDUP_CLIMAX_CENTER.")
+                else:
+                    # During buildup/climax: do not count or add visuals
+                    print(f"[ARRIVED] {arm.value} (ignored for count; climax phase active)")
+
                 self._reset_arm(star)
-            else:
-                pass  # late/stray arrival after abort or reset — ignore
+            # else: late/stray arrival — ignore
 
+    # ---------------- RESET HELPERS ----------------
     def _reset_arm(self, star: Star):
         star.state = StarState.IDLE
         star.active = False
@@ -356,24 +426,39 @@ class MacMiniController:
         star.confirmed_at = None
         star.last_warn = None
 
+    def _reset_show_cycle(self):
+        """Reset all state so a new cycle can begin immediately."""
+        with self.lock:
+            # Reset all arms
+            for star in self.arms.values():
+                self._reset_arm(star)
+            # Clear pending confirmations (cancel any retries still in-flight)
+            self.pending_confirms.clear()
+            # Reset counters and climax state and latches
+            self.stars_collected = 0
+            self.climax_state = ClimaxState.IDLE
+            self.climax_done_center = False
+            self.climax_done_top = False
+
     # ---------------- PEAK TRIGGER ----------------
     def trigger_peak(self, arm_num: int):
         arm = DeviceType[f"ARM{arm_num}"]
         with self.lock:
+            # During buildup/climax we ignore peaks
+            if self.climax_state in (ClimaxState.BUILDUP_WAIT_ACK, ClimaxState.BUILDUP_WAIT_READY, ClimaxState.RUNNING):
+                print(f"[PEAK] Ignored: climax phase is active ({self.climax_state.name})")
+                return
+
             star = self.arms[arm]
             now = time.time()
 
-            # Debug line (optional): shows state & pending keys for this arm
-            # print(f"[DBG] {arm.value} state={star.state.name}, pending={[k for k in self.pending_confirms.keys() if k[0]==arm.value]}")
-
-            if star.state in (StarState.IDLE,):
+            if star.state == StarState.IDLE:
                 # Start new star: wait for MAKE_STAR confirm before allowing updates
                 star.state = StarState.WAIT_CONFIRM
                 star.active = True
                 star.brightness = UPDATE_STEP
-                # CHANGED: do not start timers yet; they begin on CONFIRM:MAKE_STAR
-                star.start_time = None        # ← moved to confirm handler
-                star.last_peak_time = None    # ← moved to confirm handler
+                star.start_time = None           # timers start on confirm
+                star.last_peak_time = None
                 star.retry_count = 0
                 star.awaiting_ack = False
                 star.awaiting_arrival = False
@@ -381,11 +466,10 @@ class MacMiniController:
                 print(f"[PEAK] New star on {arm.value} (brightness={star.brightness})")
 
             elif star.state == StarState.WAIT_CONFIRM:
-                # Ignore peaks until MAKE_STAR is confirmed
                 print(f"[PEAK] Ignored: {arm.value} waiting for MAKE_STAR confirm")
 
             elif star.state == StarState.ACTIVE:
-                # EXTRA GUARD: if MAKE_STAR confirm still pending, block updates
+                # Guard: block updates if MAKE_STAR is still pending confirm
                 if (arm.value, RequestType.MAKE_STAR.value) in self.pending_confirms:
                     print(f"[PEAK] Ignored: {arm.value} MAKE_STAR not yet confirmed (pending ACK)")
                     return
@@ -404,31 +488,33 @@ class MacMiniController:
         try:
             while True:
                 now = time.time()
-                send_queue: List[Star] = []
 
                 # Generic retry engine for ALL pending requests
                 for key, tracker in list(self.pending_confirms.items()):
                     if (now - tracker.last_sent) >= ACK_TIMEOUT:
                         if tracker.retries < MAX_SEND_RETRIES:
-                            # Re-send same command with same brightness
+                            # Increment retry count and re-send same command with same brightness
                             self.pending_confirms[key].retries += 1
                             self.pending_confirms[key].last_sent = now
                             self.send_command(Message(tracker.cmd, tracker.device, tracker.brightness))
                         else:
+                            # Give up on this command
                             del self.pending_confirms[key]
                             print(f"[ERROR] {tracker.device.value} no CONFIRM after {MAX_SEND_RETRIES} {tracker.cmd.value} attempts.")
-                            # If SEND_STAR fails, reset that arm so it doesn't get stuck
+                            # If SEND_STAR fails for an arm, reset that arm so it doesn't get stuck
                             if tracker.cmd == RequestType.SEND_STAR and tracker.device.name.startswith("ARM"):
                                 with self.lock:
                                     self._reset_arm(self.arms[tracker.device])
 
+                # Handle star lifecycle & auto-dispatch & timeouts
+                send_queue: List[Star] = []
                 with self.lock:
                     for star in self.arms.values():
                         if star.state == StarState.ACTIVE:
+                            # Auto-dispatch rules after MAKE_STAR confirmed
                             elapsed = now - (star.start_time or now)
                             idle = now - (star.last_peak_time or now)
                             if elapsed >= STAR_SEND_TIME or idle >= PEAK_TIMEOUT or star.brightness >= MAX_BRIGHTNESS:
-                                # Move to dispatch phase
                                 star.state = StarState.DISPATCHING
                                 star.active = False
                                 star.awaiting_ack = True
@@ -450,11 +536,19 @@ class MacMiniController:
                 for s in send_queue:
                     self._try_send_star(s)
 
+                # Climax state transitions driven by confirms/requests
+                # When BUILDUP_CLIMAX_CENTER is confirmed, move to wait for CLIMAX_READY
+                if self.climax_state == ClimaxState.BUILDUP_WAIT_ACK:
+                    if (DeviceType.CENTER.value, RequestType.BUILDUP_CLIMAX_CENTER.value) not in self.pending_confirms:
+                        self.climax_state = ClimaxState.BUILDUP_WAIT_READY
+                        print("[CLIMAX] BUILDUP_CLIMAX_CENTER confirmed → waiting for CLIMAX_READY from CENTER.")
+
                 time.sleep(0.1)
         except KeyboardInterrupt:
             self.shutdown()
 
     def _try_send_star(self, star: Star):
+        # Send SEND_STAR via the same command path (tracked/retried generically)
         self.send_command(Message(RequestType.SEND_STAR, star.arm, star.brightness))
         star.last_send_attempt = time.time()
         star.retry_count += 1
