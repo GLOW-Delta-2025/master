@@ -23,6 +23,7 @@ Robustness:
 - Generic confirm/retry engine for ALL requests (with MAX_SEND_RETRIES).
 - WARN if STAR_ARRIVED takes too long; ERROR & reset if it never comes.
 - Idempotent handlers (ignore duplicates/late messages safely).
+- Keep-alive PINGs to all devices on a configurable interval; health tracking.
 """
 
 import time
@@ -50,9 +51,13 @@ ARRIVAL_WARN_AFTER = 8.0    # warn if no STAR_ARRIVED after this many seconds
 ARRIVAL_TIMEOUT = 15.0      # give up on STAR_ARRIVED after this many seconds and reset arm
 WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 seconds
 
+# Keep-alive
+DEFAULT_KEEPALIVE_INTERVAL = 60.0   # seconds; adjustable live
+HEALTH_FAIL_THRESHOLD = 3           # consecutive failed pings to mark offline
+
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-22-CLIMAX-RESET-FIX-RLOCK"
+VERSION = "2025-10-22-CLIMAX-RESET-FIX-RLOCK+KEEPALIVE"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -66,6 +71,7 @@ class DeviceType(Enum):
     TOP = "TOP"
 
 ARMS = [DeviceType[f"ARM{i}"] for i in range(1, NUM_ARMS + 1)]
+ALL_DEVICES = ARMS + [DeviceType.CENTER, DeviceType.TOP]
 
 class RequestType(Enum):
     # Star flow
@@ -85,6 +91,9 @@ class RequestType(Enum):
     START_CLIMAX_TOP = "START_CLIMAX_TOP"            # Mac → TOP
     CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # CENTER → Mac (REQUEST)
     CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # TOP → Mac (REQUEST)
+
+    # Keep-alive
+    PING = "PING"
 
 class StarState(Enum):
     IDLE = 0
@@ -118,7 +127,6 @@ class Star:
         self.arm = arm
         self.state = StarState.IDLE
         self.active = False
-               # brightness set by peaks
         self.brightness = 0
         self.start_time: Optional[float] = None
         self.last_peak_time: Optional[float] = None
@@ -153,7 +161,7 @@ class MacMiniController:
 
         self.arms = {arm: Star(arm) for arm in ARMS}
 
-        # >>> RLock to avoid deadlocks when helpers call helpers under the same lock
+        # RLock to avoid deadlocks when helpers call helpers under the same lock
         self.lock = threading.RLock()
 
         self.stars_collected = 0
@@ -168,10 +176,21 @@ class MacMiniController:
         # pending confirmations for all outgoing requests
         self.pending_confirms: Dict[PendingKey, RequestTracker] = {}
 
+        # keep-alive state
+        self.keepalive_interval = DEFAULT_KEEPALIVE_INTERVAL
+        self._next_keepalive_due = time.time() + self.keepalive_interval
+
+        # device health
+        now = time.time()
+        self.health: Dict[DeviceType, Dict[str, object]] = {
+            dev: {"online": True, "failures": 0, "last_seen": now}
+            for dev in ALL_DEVICES
+        }
+
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
         print("[MAC MINI] Initialized - Manual 5 ARM control ready")
-        print("[TEST] Press keys 1–5 to trigger peaks for respective arms. 'R' to manual-reset. Ctrl+C to exit.")
+        print("[TEST] Keys: 1–5 peaks · 'k' cycle keep-alive (30/60/120s) · 'h' health · 'R' manual reset · Ctrl+C exit.")
 
     # ---------------- SEND COMMANDS ----------------
     def send_command(self, msg: Message):
@@ -326,6 +345,12 @@ class MacMiniController:
 
         # ---- Generic CONFIRM handling (stop retries) ----
         if verb == "CONFIRM":
+            # mark device as healthy for keep-alive (any confirm counts as activity)
+            if dev in self.health:
+                self.health[dev]["online"] = True
+                self.health[dev]["failures"] = 0
+                self.health[dev]["last_seen"] = time.time()
+
             self.pending_confirms.pop((dev.value, cmd), None)
 
             # SEND_STAR confirmation advances the arm state
@@ -456,6 +481,55 @@ class MacMiniController:
             self.climax_done_center = False
             self.climax_done_top = False
 
+    # ---------------- KEEP-ALIVE ----------------
+    def _send_keepalives_if_due(self, now: float):
+        if now < self._next_keepalive_due:
+            return
+        self._next_keepalive_due = now + self.keepalive_interval
+
+        # Send PING to all devices, but don't spam if a PING is already pending for that device
+        for dev in ALL_DEVICES:
+            key = (dev.value, RequestType.PING.value)
+            if key in self.pending_confirms:
+                continue  # still waiting for previous ping confirm
+            self.send_command(Message(RequestType.PING, dev))
+
+        print(f"[PING] Keep-alive sent to all devices (interval={int(self.keepalive_interval)}s).")
+
+    def set_keepalive_interval(self, seconds: float):
+        with self.lock:
+            self.keepalive_interval = max(5.0, float(seconds))  # clamp to >= 5s
+            self._next_keepalive_due = time.time() + self.keepalive_interval
+        print(f"[PING] Keep-alive interval set to {int(self.keepalive_interval)}s.")
+
+    def _handle_ping_failure(self, dev: DeviceType):
+        if dev not in self.health:
+            return
+        h = self.health[dev]
+        h["failures"] = int(h.get("failures", 0)) + 1
+        if h["failures"] >= HEALTH_FAIL_THRESHOLD:
+            if h.get("online", True):
+                print(f"[PING][WARN] {dev.value} missed {HEALTH_FAIL_THRESHOLD} keep-alives → marking OFFLINE.")
+            h["online"] = False
+        else:
+            print(f"[PING][WARN] {dev.value} missed keep-alive (fail {h['failures']}/{HEALTH_FAIL_THRESHOLD}).")
+
+    def _mark_device_seen(self, dev: DeviceType):
+        if dev not in self.health:
+            return
+        self.health[dev]["online"] = True
+        self.health[dev]["failures"] = 0
+        self.health[dev]["last_seen"] = time.time()
+
+    def _print_health(self):
+        print("\n[HEALTH] Device status:")
+        for dev in ALL_DEVICES:
+            h = self.health[dev]
+            age = time.time() - float(h["last_seen"])
+            online = "ONLINE " if h["online"] else "OFFLINE"
+            print(f"  - {dev.value:6s}  {online}  failures={h['failures']}  last_seen={age:4.1f}s ago")
+        print("")
+
     # ---------------- PEAK TRIGGER ----------------
     def trigger_peak(self, arm_num: int):
         arm = DeviceType[f"ARM{arm_num}"]
@@ -521,6 +595,12 @@ class MacMiniController:
                             if tracker.cmd == RequestType.SEND_STAR and tracker.device.name.startswith("ARM"):
                                 with self.lock:
                                     self._reset_arm(self.arms[tracker.device])
+                            # If PING failed, bump health failure counter
+                            if tracker.cmd == RequestType.PING:
+                                self._handle_ping_failure(tracker.device)
+
+                # Keep-alive
+                self._send_keepalives_if_due(now)
 
                 # Handle star lifecycle & auto-dispatch & timeouts
                 send_queue: List[Star] = []
@@ -553,7 +633,6 @@ class MacMiniController:
                     self._try_send_star(s)
 
                 # Climax state transitions driven by confirms/requests
-                # When BUILDUP_CLIMAX_CENTER is confirmed, move to wait for CLIMAX_READY
                 if self.climax_state == ClimaxState.BUILDUP_WAIT_ACK:
                     if (DeviceType.CENTER.value, RequestType.BUILDUP_CLIMAX_CENTER.value) not in self.pending_confirms:
                         self.climax_state = ClimaxState.BUILDUP_WAIT_READY
@@ -598,6 +677,16 @@ class MacMiniController:
                     with self.lock:
                         self._reset_show_cycle()
                     print("[DEV] Manual reset via keyboard.")
+                elif key in ("k", "K"):
+                    # Cycle through handy presets for on-site tweaking
+                    presets = [30.0, 60.0, 120.0]
+                    try:
+                        idx = presets.index(self.keepalive_interval)
+                        self.set_keepalive_interval(presets[(idx + 1) % len(presets)])
+                    except ValueError:
+                        self.set_keepalive_interval(60.0)
+                elif key in ("h", "H"):
+                    self._print_health()
         except KeyboardInterrupt:
             self.shutdown()
 
