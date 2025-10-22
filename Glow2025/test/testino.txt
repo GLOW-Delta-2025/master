@@ -1,10 +1,3 @@
-// =====================================================
-// Teensy / Arduino Firmware v4 (parallel delayed commands)
-// Handles any [SOURCE]:REQUEST:[COMMAND]{params} format
-// Delayed responses: STAR_ARRIVED & CLIMAX_READY
-// Multiple delayed commands can run in parallel
-// =====================================================
-
 #include <Arduino.h>
 
 String inputBuffer = "";
@@ -12,200 +5,208 @@ bool messageStarted = false;
 const int LED_PIN = LED_BUILTIN;
 
 struct DelayedCommand {
-  String source;
-  String command;              // STAR_ARRIVED or CLIMAX_READY
-  unsigned long triggerTime;   // millis() when it should be sent
+  String source;            // e.g., "ARM1", "CENTER", "TOP"
+  String command;           // STAR_ARRIVED, CLIMAX_READY, CLIMAX_DONE_CENTER, CLIMAX_DONE_TOP
+  unsigned long triggerTime;
   bool active;
 };
 
-const int MAX_DELAYED = 10;
+const int MAX_DELAYED = 8;   // a few concurrent delayed events
 DelayedCommand delayed[MAX_DELAYED];
 
-// =====================================================
-// Helper function to schedule delayed commands
-// =====================================================
-void scheduleDelayedCommand(String source, String command) {
+// --- Track first-time drops (tiny memory footprint)
+bool droppedMake         = false;
+bool droppedUpdate       = false;
+bool droppedSend         = false;
+bool droppedAddTop       = false;
+bool droppedAddCenter    = false;
+bool droppedBuildup      = false;  // BUILDUP_CLIMAX_CENTER
+bool droppedStartCenter  = false;  // START_CLIMAX_CENTER
+bool droppedStartTop     = false;  // START_CLIMAX_TOP
+
+// Utility: schedule a delayed REQUEST from a device
+// default delay 5–8s, suitable for animation/buildup simulation
+void scheduleDelayedCommand(const String& source, const String& command, unsigned long minDelay = 5000UL, unsigned long maxDelay = 8000UL) {
   for (int i = 0; i < MAX_DELAYED; i++) {
     if (!delayed[i].active) {
       delayed[i].source = source;
       delayed[i].command = command;
-      delayed[i].triggerTime = millis() + random(5000, 8000);  // 5–8 seconds
+      unsigned long span = (maxDelay > minDelay) ? (maxDelay - minDelay) : 0;
+      unsigned long jitter = span ? (random(span)) : 0;
+      delayed[i].triggerTime = millis() + minDelay + jitter;
       delayed[i].active = true;
       return;
     }
   }
-
-  // Overflow protection
-  Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{too_many_delayed_commands}##");
+  // no space; silently drop to keep sketch tiny
 }
 
-// =====================================================
-// Setup
-// =====================================================
 void setup() {
   delay(2000);
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   randomSeed(analogRead(0));
-
-  // Initialize delayed commands array
   for (int i = 0; i < MAX_DELAYED; i++) delayed[i].active = false;
 }
 
-// =====================================================
-// Main loop
-// =====================================================
 void loop() {
-  // --- Handle incoming serial data ---
+  // --- Assemble frames "!!...##" ---
   while (Serial.available() > 0) {
     char c = Serial.read();
-
     if (c == '!' && !messageStarted) {
       messageStarted = true;
       inputBuffer = "!!";
     } else if (messageStarted) {
       inputBuffer += c;
-
       if (inputBuffer.endsWith("##")) {
         handleMessage(inputBuffer);
         inputBuffer = "";
         messageStarted = false;
       }
-
-      if (inputBuffer.length() > 256) {
-        Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{overflow}##");
+      if (inputBuffer.length() > 200) { // simple overflow guard
         inputBuffer = "";
         messageStarted = false;
       }
     }
   }
 
-  // --- Handle delayed commands ---
+  // --- Emit delayed REQUESTs ---
   unsigned long now = millis();
   for (int i = 0; i < MAX_DELAYED; i++) {
     if (delayed[i].active && now >= delayed[i].triggerTime) {
-      sendConfirm(delayed[i].source, delayed[i].command);
-      delayed[i].active = false;  // deactivate
+      sendRequest(delayed[i].source, delayed[i].command);
+      delayed[i].active = false;
     }
   }
 }
 
-// =====================================================
-// Handle and parse full message (2-colon version)
-// =====================================================
+// ----------------------------------------------------
+// Core frame handler (tiny parser: "!!<src>:<type>:<cmd>{...}##")
+// We only care about the src and cmd (type is always REQUEST from Mac).
+// ----------------------------------------------------
 void handleMessage(String msg) {
   msg.trim();
+  if (!msg.startsWith("!!") || !msg.endsWith("##")) return;
 
-  if (!msg.startsWith("!!") || !msg.endsWith("##")) {
-    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{invalid_format}##");
-    return;
-  }
-
+  // strip !! and ##
   msg.remove(0, 2);
   msg.remove(msg.length() - 2, 2);
 
   int c1 = msg.indexOf(':');
   int c2 = msg.indexOf(':', c1 + 1);
+  if (c1 < 0 || c2 < 0) return;
 
-  if (c1 < 0 || c2 < 0) {
-    Serial.println("!!UNKNOWN:MASTER:REQUEST:ERROR:{bad_structure}##");
-    return;
-  }
-
-  String source = msg.substring(0, c1);
-  if (source.startsWith("!")) source.remove(0, 1);
-
-  String maybeType = msg.substring(c1 + 1, c2);
-  String command = msg.substring(c2 + 1);
-
+  String source = msg.substring(0, c1);       // e.g., "ARM1", "CENTER", "TOP"
+  String command = msg.substring(c2 + 1);     // e.g., "MAKE_STAR{50}" or "SEND_STAR"
   int bracePos = command.indexOf('{');
   if (bracePos >= 0) command = command.substring(0, bracePos);
   command.trim();
 
+  // ---- One-time drop to force Mac retries ----
+  if (command.equalsIgnoreCase("MAKE_STAR") && !droppedMake) {
+    droppedMake = true;      // drop confirm once
+    return;
+  }
+  if (command.equalsIgnoreCase("UPDATE_STAR") && !droppedUpdate) {
+    droppedUpdate = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("SEND_STAR") && !droppedSend) {
+    droppedSend = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("ADD_STAR_TOP") && !droppedAddTop) {
+    droppedAddTop = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("ADD_STAR_CENTER") && !droppedAddCenter) {
+    droppedAddCenter = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER") && !droppedBuildup) {
+    droppedBuildup = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("START_CLIMAX_CENTER") && !droppedStartCenter) {
+    droppedStartCenter = true;
+    return;
+  }
+  if (command.equalsIgnoreCase("START_CLIMAX_TOP") && !droppedStartTop) {
+    droppedStartTop = true;
+    return;
+  }
 
-  if (maybeType.equalsIgnoreCase("REQUEST")) {
-    String devices[] = {"ARM1", "ARM2", "ARM3", "ARM4", "ARM5", "CENTER", "TOP"};
+  // ---- Normal path: send CONFIRM, and schedule any follow-up REQUESTs ----
+  sendConfirm(source, command);
 
-    // Schedule delayed commands if needed
-    if (command.equalsIgnoreCase("SEND_STAR")) {
-      if (source.equalsIgnoreCase("BROADCAST")) {
-        for (int i = 0; i < 7; i++) scheduleDelayedCommand(devices[i], "STAR_ARRIVED");
-      } else {
-        scheduleDelayedCommand(source, "STAR_ARRIVED");
-      }
-    }
+  // Star animation result later
+  if (command.equalsIgnoreCase("SEND_STAR")) {
+    scheduleDelayedCommand(source, "STAR_ARRIVED", 4000UL, 7000UL); // 4–7s animation
+  }
 
-    // Always send immediate confirm
-    if (source.equalsIgnoreCase("BROADCAST")) {
-      for (int i = 0; i < 7; i++) sendConfirm(devices[i], command);
-    } else {
-      sendConfirm(source, command);
-    }
-  } else {
-    Serial.println("!!" + source + ":MASTER:REQUEST:ERROR:{unknown_type_" + maybeType + "}##");
+  // Climax buildup: CENTER will later say CLIMAX_READY
+  if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER")) {
+    scheduleDelayedCommand(source, "CLIMAX_READY", 3000UL, 5000UL); // 3–5s buildup
+  }
+
+  // After STARTs: later send DONEs from respective devices
+  if (command.equalsIgnoreCase("START_CLIMAX_CENTER")) {
+    scheduleDelayedCommand(source, "CLIMAX_DONE_CENTER", 5000UL, 8000UL); // 5–8s
+  }
+  if (command.equalsIgnoreCase("START_CLIMAX_TOP")) {
+    scheduleDelayedCommand(source, "CLIMAX_DONE_TOP", 5000UL, 8000UL);    // 5–8s
   }
 }
 
-// =====================================================
-// Visual blink feedback
-// =====================================================
+// ----------------------------------------------------
+// Send a CONFIRM for a REQUEST we just received
+// ----------------------------------------------------
+void sendConfirm(String source, const String& command) {
+  // normalize "!!" prefixed accidental sources if any
+  while (source.startsWith("!")) source.remove(0, 1);
 
+  // Confirm frame: !!<source>:MASTER:CONFIRM:<command>##
+  String msg = "!!" + source + ":MASTER:CONFIRM:" + command + "##";
+  Serial.println(msg);
+}
 
-// =====================================================
-// Generate proper CONFIRM messages including SOURCE
-// =====================================================
-void sendConfirm(String source, String command) {
-  String msg = "!!" + source + ":MASTER:CONFIRM:";
+// ----------------------------------------------------
+// Send a REQUEST event from a device to MASTER (delayed)
+// ----------------------------------------------------
+void sendRequest(const String& source, const String& command) {
+  String s = source;
+  while (s.startsWith("!")) s.remove(0, 1);
 
-  if (command.equalsIgnoreCase("MAKE_STAR")) {
-    msg += "MAKE_STAR##";
-  } else if (command.equalsIgnoreCase("SEND_STAR")) {
-    msg += "SEND_STAR##";
-  } else if (command.equalsIgnoreCase("CANCEL_STAR")) {
-    msg += "CANCEL_STAR##";
-  } else if (command.equalsIgnoreCase("STAR_ARRIVED")) {
-    msg = "!!" + source + ":MASTER:REQUEST:";
-    msg += "STAR_ARRIVED{";
+  // Map delayed command to proper REQUEST payloads
+  if (command.equalsIgnoreCase("STAR_ARRIVED")) {
+    String msg = "!!" + s + ":MASTER:REQUEST:STAR_ARRIVED{";
     msg += "SPEED=" + String(random(10, 100)) + ",";
     msg += "COLOR=" + String(random(0, 255)) + ",";
     msg += "BRIGHTNESS=" + String(random(50, 255)) + ",";
     msg += "SIZE=" + String(random(1, 10)) + "}##";
-  } else if (command.equalsIgnoreCase("ADD_STAR")) {
-    msg += "ADD_STAR##";
-  } else if (command.equalsIgnoreCase("BUILDUP_CLIMAX_CENTER")) {
-    msg += "BUILDUP_CLIMAX_CENTER{SPEED=" + String(random(50, 200)) + "}##";
-  } else if (command.equalsIgnoreCase("CLIMAX_READY")) {
-    msg += "CLIMAX_READY##";
-  } else if (command.equalsIgnoreCase("START_CLIMAX_CENTER")) {
-    msg += "START_CLIMAX_CENTER{TIME=" + String(random(1000, 5000)) + "}##";
-  } else if (command.equalsIgnoreCase("START_CLIMAX_TOP")) {
-    msg += "START_CLIMAX_TOP{TIME=" + String(random(1000, 5000)) + "}##";
-  } else if (command.equalsIgnoreCase("STOP_CLIMAX_CENTER")) {
-    msg += "STOP_CLIMAX_CENTER##";
-  } else if (command.equalsIgnoreCase("STOP_CLIMAX_TOP")) {
-    msg += "STOP_CLIMAX_TOP##";
-  } else if (command.equalsIgnoreCase("START_IDLE")) {
-    msg += "START_IDLE##";
-  } else if (command.equalsIgnoreCase("STOP_IDLE")) {
-    msg += "STOP_IDLE##";
-  } else if (command.equalsIgnoreCase("PING")) {
-    msg += "PING##";
-  } else if (command.equalsIgnoreCase("RESET")) {
-    msg += "RESET##";
-  } else if (command.equalsIgnoreCase("COMM_ERROR")) {
-    msg += "COMM_ERROR{STRING=Random_Comm_Error_" + String(random(100, 999)) + "}##";
-  } 
-  // ------------------------------
-  // NEW: UPDATE_STAR confirm branch
-  // ------------------------------
-  else if (command.equalsIgnoreCase("UPDATE_STAR")) {
-    msg += "UPDATE_STAR##";
-  }
-  // ------------------------------
-  else {
-    msg = "!!" + source + ":MASTER:REQUEST:ERROR:{unknown_command_" + command + "}##";
+    Serial.println(msg);
+    return;
   }
 
-  Serial.println(msg);
+  if (command.equalsIgnoreCase("CLIMAX_READY")) {
+    String msg = "!!" + s + ":MASTER:REQUEST:CLIMAX_READY##";
+    Serial.println(msg);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("CLIMAX_DONE_CENTER")) {
+    String msg = "!!" + s + ":MASTER:REQUEST:CLIMAX_DONE_CENTER##";
+    Serial.println(msg);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("CLIMAX_DONE_TOP")) {
+    String msg = "!!" + s + ":MASTER:REQUEST:CLIMAX_DONE_TOP##";
+    Serial.println(msg);
+    return;
+  }
+
+  // Fallback: if we ever schedule a non-REQUEST token accidentally, just CONFIRM it
+  sendConfirm(s, command);
 }
