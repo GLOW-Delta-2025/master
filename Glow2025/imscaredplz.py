@@ -3,6 +3,8 @@
 GLOW 25' - Mac Mini Control System (Five Arms, Router-Aware, Robust)
 Audio-reactive lighting control with 5 arms and Teensy router.
 
+Now integrated with audiolib for microphone peak detection → arm triggering.
+
 Protocol expectations (as seen by the Mac Mini):
 - Outgoing (we send):            !![DEVICE]:REQUEST:<CMD>{...}##
   (Router will forward as):      !!MASTER:[DEVICE]:REQUEST:<CMD>{...}##
@@ -10,6 +12,8 @@ Protocol expectations (as seen by the Mac Mini):
 - Incoming events to master:     !![DEVICE]:MASTER:REQUEST:<EVENT>##
 
 Behavior:
+- Audio peaks on channels are mapped to arms (e.g., channel 6 → ARM1, channel 7 → ARM2, etc.)
+- Each detected peak triggers trigger_peak() for the corresponding arm.
 - Peaks (keys 1–5) create/update a star on the corresponding arm.
 - When conditions hit, we SEND_STAR and wait for CONFIRM with retries (ACK_TIMEOUT).
 - Only after STAR_ARRIVED do we count the star and update TOP & CENTER.
@@ -24,6 +28,7 @@ Robustness:
 - WARN if STAR_ARRIVED takes too long; ERROR & reset if it never comes.
 - Idempotent handlers (ignore duplicates/late messages safely).
 - Keep-alive PINGs to all devices on a configurable interval; health tracking.
+- Audio peak detection with configurable channels and sensitivity.
 """
 
 import time
@@ -31,10 +36,12 @@ import threading
 import serial
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple, List, Dict, Tuple as Tup
+from typing import Optional, Tuple, List, Dict
+
+from lib.audiolib import AudioProcessorLib
 
 # ---------------- CONFIG ----------------
-SERIAL_PORT = "/dev/tty.usbmodem14301"
+SERIAL_PORT = "/dev/pts/4"
 SERIAL_BAUD = 115200
 
 NUM_ARMS = 5
@@ -55,9 +62,19 @@ WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 se
 DEFAULT_KEEPALIVE_INTERVAL = 60.0   # seconds; adjustable live
 HEALTH_FAIL_THRESHOLD = 3           # consecutive failed pings to mark offline
 
+# Audio configuration
+AUDIO_DEVICE = 6                   # input device index
+AUDIO_CHANNELS = (0, 1)            # mic channels to listen on
+AUDIO_POLL_INTERVAL = 0.50         # polling frequency (seconds)
+AUDIO_THRESHOLD_DB = 10            # spike detection threshold (dB above noise)
+AUDIO_CHANNEL_TO_ARM = {
+    0: 1,  # channel 0 → ARM1
+    1: 2,  # channel 1 → ARM2
+}
+
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-22-CLIMAX-RESET-FIX-RLOCK+KEEPALIVE"
+VERSION = "2025-10-22-AUDIO-REACTIVE-PEAKS"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -150,7 +167,7 @@ class RequestTracker:
     retries: int
     brightness: Optional[int] = None
 
-PendingKey = Tup[str, str]  # (device.value, request_type.value)
+PendingKey = Tuple[str, str]  # (device.value, request_type.value)
 
 class MacMiniController:
     def __init__(self):
@@ -187,10 +204,34 @@ class MacMiniController:
             for dev in ALL_DEVICES
         }
 
+        # Initialize audio processor with spike detection
+        self.audio_lib = AudioProcessorLib(
+            device=AUDIO_DEVICE,
+            channels=AUDIO_CHANNELS,
+            poll_interval=AUDIO_POLL_INTERVAL,
+            start_stream=True
+        )
+        self.audio_lib.config(threshold=AUDIO_THRESHOLD_DB)
+        self.audio_lib.register_spike_callback(self._on_audio_spike)
+        self.audio_lib.start()
+        print(f"[AUDIO] Initialized on device {AUDIO_DEVICE}, channels {AUDIO_CHANNELS}, threshold {AUDIO_THRESHOLD_DB}dB")
+
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
-        print("[MAC MINI] Initialized - Manual 5 ARM control ready")
-        print("[TEST] Keys: 1–5 peaks · 'k' cycle keep-alive (30/60/120s) · 'h' health · 'R' manual reset · Ctrl+C exit.")
+        print("[MAC MINI] Initialized - Audio-reactive 5 ARM control ready")
+        print("[AUDIO] Peaks on configured channels will trigger arm animations")
+        print("[TEST] Manual: 'k' cycle keep-alive · 'h' health · 'R' reset · Ctrl+C exit.")
+
+    # -------------- AUDIO SPIKE CALLBACK ---------------
+    def _on_audio_spike(self, channel: int, spike_obj, avg_db, noise_db):
+        """Callback from audiolib when a peak is detected."""
+        arm_num = AUDIO_CHANNEL_TO_ARM.get(channel)
+        if arm_num is not None:
+            print(f"[SPIKE] Channel {channel} → ARM{arm_num} (avg={avg_db:.1f}dB, noise={noise_db:.1f}dB)")
+            self.trigger_peak(arm_num)
+        else:
+            if DEBUG_FRAMES:
+                print(f"[SPIKE] Channel {channel} (unmapped) avg={avg_db:.1f}dB, noise={noise_db:.1f}dB")
 
     # ---------------- SEND COMMANDS ----------------
     def send_command(self, msg: Message):
@@ -300,7 +341,7 @@ class MacMiniController:
         if token is None:
             return None
         t = token.strip()
-        if t.startswith("") and t.endswith(""):
+        if t.startswith("[") and t.endswith("]"):
             t = t[1:-1]
         return t
 
@@ -687,12 +728,29 @@ class MacMiniController:
                         self.set_keepalive_interval(60.0)
                 elif key in ("h", "H"):
                     self._print_health()
+                elif key in ("a", "A"):
+                    # Audio config: adjust threshold on the fly
+                    print("[AUDIO] Current threshold: {:.1f}dB".format(self.audio_lib.processor.spike_threshold_db))
+                    print("[AUDIO] Enter new threshold (dB) or press Enter to cancel:")
+                    try:
+                        user_input = input().strip()
+                        if user_input:
+                            new_thresh = float(user_input)
+                            self.audio_lib.config(threshold=new_thresh)
+                            print(f"[AUDIO] Threshold updated to {new_thresh:.1f}dB")
+                    except ValueError:
+                        print("[AUDIO] Invalid input, keeping current threshold.")
         except KeyboardInterrupt:
             self.shutdown()
 
     def shutdown(self):
         print("\n[MAC MINI] Shutting down...")
         self._stop = True
+        try:
+            self.audio_lib.stop(stop_stream=True)
+            print("[AUDIO] Audio processor stopped.")
+        except Exception as e:
+            print(f"[AUDIO] Error stopping audio: {e}")
         try:
             self.serial.close()
         except Exception:
