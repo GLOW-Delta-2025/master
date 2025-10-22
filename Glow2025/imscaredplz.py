@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 GLOW 25' - Mac Mini Control System (Five Arms, Router-Aware, Robust)
 Audio-reactive lighting control with 5 arms and Teensy router.
@@ -217,7 +217,7 @@ class MacMiniController:
         src_raw, dest_raw, verb_raw = parts[0], parts[1], parts[2]
         cmd_and_payload = ":".join(parts[3:]).strip()
 
-        # Extract command and optional payload (accept "{...}" or "{[...]}"), payload optional
+        # Extract command and optional payload
         payload = None
         lb = cmd_and_payload.find("{")
         if lb != -1:
@@ -281,7 +281,11 @@ class MacMiniController:
                 # clear pending
                 self.pending_confirms.pop((dev.value, cmd), None)
                 if star.state == StarState.WAIT_CONFIRM:
+                    # CHANGED: start timers on confirm (not on first peak)
+                    now = time.time()
                     star.state = StarState.ACTIVE
+                    star.start_time = now            # ← timer starts here
+                    star.last_peak_time = now        # ← reset idle timer here too
                     print(f"[ACK] {dev.value} confirmed MAKE_STAR; now ACTIVE")
             return
 
@@ -359,16 +363,17 @@ class MacMiniController:
             star = self.arms[arm]
             now = time.time()
 
-            # DBG: show state and any pending confirms for this arm
-            print(f"[DBG] {arm.value} state={star.state.name}, pending={[k for k in self.pending_confirms.keys() if k[0]==arm.value]}")
+            # Debug line (optional): shows state & pending keys for this arm
+            # print(f"[DBG] {arm.value} state={star.state.name}, pending={[k for k in self.pending_confirms.keys() if k[0]==arm.value]}")
 
             if star.state in (StarState.IDLE,):
                 # Start new star: wait for MAKE_STAR confirm before allowing updates
                 star.state = StarState.WAIT_CONFIRM
                 star.active = True
                 star.brightness = UPDATE_STEP
-                star.start_time = now
-                star.last_peak_time = now
+                # CHANGED: do not start timers yet; they begin on CONFIRM:MAKE_STAR
+                star.start_time = None        # ← moved to confirm handler
+                star.last_peak_time = None    # ← moved to confirm handler
                 star.retry_count = 0
                 star.awaiting_ack = False
                 star.awaiting_arrival = False
