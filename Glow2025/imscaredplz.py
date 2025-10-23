@@ -24,11 +24,13 @@ Robustness:
 - WARN if STAR_ARRIVED takes too long; ERROR & reset if it never comes.
 - Idempotent handlers (ignore duplicates/late messages safely).
 - Keep-alive PINGs to all devices on a configurable interval; health tracking.
+- Param payloads per device: ARM (speed 2–10, int color), CENTER (speed 8–25, hex color).
 """
 
 import time
 import threading
 import serial
+import random
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, List, Dict, Tuple as Tup
@@ -55,9 +57,13 @@ WARN_THROTTLE = 2.0         # throttle warnings to at most once per arm per 2 se
 DEFAULT_KEEPALIVE_INTERVAL = 60.0   # seconds; adjustable live
 HEALTH_FAIL_THRESHOLD = 3           # consecutive failed pings to mark offline
 
+# Device-specific parameter ranges
+ARM_SPEED_MIN, ARM_SPEED_MAX = 2, 10
+CENTER_SPEED_MIN, CENTER_SPEED_MAX = 8, 25
+
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-22-CLIMAX-RESET-FIX-RLOCK+KEEPALIVE"
+VERSION = "2025-10-23-PARAMS-ARM-CENTER"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -112,13 +118,34 @@ class ClimaxState(Enum):
 class Message:
     request_type: RequestType
     target_device: DeviceType
-    brightness: Optional[int] = None
+    brightness: Optional[int] = None           # kept for convenience
+    params: Optional[Dict[str, object]] = None # payload; values can be int or str (for hex)
 
     def to_command(self) -> str:
-        # We send: "!!DEVICE:REQUEST:<CMD>{BRIGHTNESS?}##"
         cmd = f"!!{self.target_device.value}:REQUEST:{self.request_type.value}"
+        # Merge brightness into params if provided
+        payload = dict(self.params) if self.params else {}
         if self.brightness is not None:
-            cmd += f"{{{self.brightness}}}"
+            payload.setdefault("BRIGHTNESS", int(self.brightness))
+        if payload:
+            # Keep a friendly order for standard fields
+            key_order = ["SPEED", "COLOR", "BRIGHTNESS", "SIZE"]
+            parts = []
+            for k in key_order:
+                if k in payload:
+                    v = payload[k]
+                    if isinstance(v, str):
+                        parts.append(f"{k}={v}")
+                    else:
+                        parts.append(f"{k}={int(v)}")
+            # Include any extra fields not in key_order
+            for k, v in payload.items():
+                if k not in {"SPEED", "COLOR", "BRIGHTNESS", "SIZE"}:
+                    if isinstance(v, str):
+                        parts.append(f"{k}={v}")
+                    else:
+                        parts.append(f"{k}={int(v)}")
+            cmd += "{" + ",".join(parts) + "}"
         cmd += "##"
         return cmd
 
@@ -131,11 +158,17 @@ class Star:
         self.start_time: Optional[float] = None
         self.last_peak_time: Optional[float] = None
 
+        # Device-specific star attributes
+        # SPEED/COLOR/SIZE will be assigned when the star starts
+        self.speed: int = ARM_SPEED_MIN
+        self.color_int: int = 128  # 0-255 (ARM form)
+        self.size: int = 5
+
         # SEND_STAR handshake
         self.retry_count = 0
         self.last_send_attempt: Optional[float] = None
-        self.awaiting_ack = False        # waiting for CONFIRM:SEND_STAR
-        self.awaiting_arrival = False    # waiting for REQUEST:STAR_ARRIVED
+        self.awaiting_ack = False
+        self.awaiting_arrival = False
         self.confirmed_at: Optional[float] = None
 
         # Warn throttle
@@ -149,6 +182,7 @@ class RequestTracker:
     last_sent: float
     retries: int
     brightness: Optional[int] = None
+    params: Optional[Dict[str, object]] = None
 
 PendingKey = Tup[str, str]  # (device.value, request_type.value)
 
@@ -187,10 +221,55 @@ class MacMiniController:
             for dev in ALL_DEVICES
         }
 
+        # Shared show color in two forms; keep them in sync
+        self.show_color_arm: int = 128              # 0-255
+        self.show_color_center: str = "#808080"     # hex code
+
         threading.Thread(target=self.receive_loop, daemon=True).start()
 
         print("[MAC MINI] Initialized - Manual 5 ARM control ready")
         print("[TEST] Keys: 1–5 peaks · 'k' cycle keep-alive (30/60/120s) · 'h' health · 'R' manual reset · Ctrl+C exit.")
+
+    # --------- Helpers: color, speed, size ----------
+    def _sync_color_from_arm(self):
+        v = int(max(0, min(255, self.show_color_arm)))
+        hexv = f"#{v:02X}{v:02X}{v:02X}"  # grayscale mapping; replace with palette if desired
+        self.show_color_center = hexv
+
+    def _sync_color_from_center(self):
+        s = self.show_color_center.strip()
+        if s.startswith("#"):
+            s = s[1:]
+        if len(s) == 6:
+            try:
+                r = int(s[0:2], 16)
+                g = int(s[2:4], 16)
+                b = int(s[4:6], 16)
+                self.show_color_arm = max(0, min(255, (r + g + b) // 3))  # average to 0-255
+            except ValueError:
+                pass
+
+    def set_show_color(self, arm_value: Optional[int] = None, center_hex: Optional[str] = None):
+        """Call this from UI/on-site to change color dynamically; keeps both forms in sync."""
+        with self.lock:
+            if arm_value is not None:
+                self.show_color_arm = int(max(0, min(255, arm_value)))
+                self._sync_color_from_arm()
+            elif center_hex is not None:
+                self.show_color_center = center_hex
+                self._sync_color_from_center()
+
+    @staticmethod
+    def _size_from_brightness(br: int) -> int:
+        # Linear map 0-255 -> 1-20
+        br = max(0, min(255, int(br)))
+        return max(1, min(20, int(round(1 + br * (19.0 / 255.0)))))
+
+    @staticmethod
+    def _rand_speed_for(dev: DeviceType) -> int:
+        if dev == DeviceType.CENTER:
+            return random.randint(CENTER_SPEED_MIN, CENTER_SPEED_MAX)
+        return random.randint(ARM_SPEED_MIN, ARM_SPEED_MAX)
 
     # ---------------- SEND COMMANDS ----------------
     def send_command(self, msg: Message):
@@ -218,7 +297,8 @@ class MacMiniController:
             cmd=msg.request_type,
             last_sent=now,
             retries=retries,
-            brightness=msg.brightness
+            brightness=msg.brightness,
+            params=msg.params
         )
 
     # ---------------- RECEIVE LOOP ----------------
@@ -248,32 +328,16 @@ class MacMiniController:
     # ---------------- FRAME PARSER ----------------
     @staticmethod
     def _parse_frame(frame: str) -> Optional[Tuple[str, str, str, str, Optional[str]]]:
-        """
-        Require: src:dest:verb:command{[payload]?}
-        Returns (src, dest, verb, cmd, payload) or None if invalid.
-        Examples:
-          !!ARM3:MASTER:CONFIRM:SEND_STAR##
-          !!ARM3:MASTER:REQUEST:STAR_ARRIVED##
-        """
         s = frame.strip()
         if not (s.startswith("!!") and s.endswith("##")):
             return None
-
-        # Strip delimiters
         core = s[2:-2]
-
-        # Remove control whitespace that can appear mid-token (serial wrap)
         core = core.replace("\r", "").replace("\n", "").replace("\t", "")
-
-        # Split and trim parts
         parts = [p.strip() for p in core.split(":")]
         if len(parts) < 4:
             return None
-
         src_raw, dest_raw, verb_raw = parts[0], parts[1], parts[2]
         cmd_and_payload = ":".join(parts[3:]).strip()
-
-        # Extract command and optional payload
         payload = None
         lb = cmd_and_payload.find("{")
         if lb != -1:
@@ -284,15 +348,10 @@ class MacMiniController:
             payload = right.strip()
         else:
             cmd_raw = cmd_and_payload.strip()
-
-        # Normalize
         verb = verb_raw.replace(" ", "").upper()
         cmd = cmd_raw.replace(" ", "").upper()
-
-        # Preserve addresses
         src = f"[{src_raw}]"
         dest = f"[{dest_raw}]"
-
         return src, dest, verb, cmd, payload
 
     @staticmethod
@@ -321,7 +380,6 @@ class MacMiniController:
                 print(f"[RECEIVED] (ignored) src={src} dest={dest} verb={verb} cmd={cmd} payload={payload}")
             return
 
-        # Map src into a DeviceType if possible
         try:
             dev = DeviceType[src]
         except Exception:
@@ -329,52 +387,46 @@ class MacMiniController:
                 print(f"[RECEIVED] (ignored unknown device) {src}")
             return
 
-        # ---- MAKE_STAR ACK (starts the star build timers) ----
+        # ---- MAKE_STAR ACK ----
         if verb == "CONFIRM" and cmd == RequestType.MAKE_STAR.value and dev.name.startswith("ARM"):
             with self.lock:
                 star = self.arms[dev]
-                # clear pending for this confirm
                 self.pending_confirms.pop((dev.value, RequestType.MAKE_STAR.value), None)
                 if star.state == StarState.WAIT_CONFIRM:
                     now = time.time()
                     star.state = StarState.ACTIVE
-                    star.start_time = now     # start timer only after confirm
+                    star.start_time = now
                     star.last_peak_time = now
                     print(f"[ACK] {dev.value} confirmed MAKE_STAR; now ACTIVE")
             return
 
-        # ---- Generic CONFIRM handling (stop retries) ----
+        # ---- Generic CONFIRM ----
         if verb == "CONFIRM":
-            # mark device as healthy for keep-alive (any confirm counts as activity)
             if dev in self.health:
                 self.health[dev]["online"] = True
                 self.health[dev]["failures"] = 0
                 self.health[dev]["last_seen"] = time.time()
-
             self.pending_confirms.pop((dev.value, cmd), None)
-
-            # SEND_STAR confirmation advances the arm state
             if cmd == RequestType.SEND_STAR.value and dev.name.startswith("ARM"):
                 self._on_confirm_send_star(dev)
             return
 
-        # ---- STAR_ARRIVED from an ARM ----
+        # ---- REQUESTS ----
         if verb == "REQUEST" and cmd == RequestType.STAR_ARRIVED.value and dev.name.startswith("ARM"):
             self._on_star_arrived(dev)
             return
 
-        # ---- CLIMAX_READY from CENTER ----
         if verb == "REQUEST" and cmd == RequestType.CLIMAX_READY.value and dev == DeviceType.CENTER:
             with self.lock:
                 if self.climax_state == ClimaxState.BUILDUP_WAIT_READY:
-                    # Fire both START commands (retry/confirm handled generically)
-                    self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER))
+                    self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER,
+                                              params={"SPEED": self._rand_speed_for(DeviceType.CENTER),
+                                                      "COLOR": self.show_color_center}))
                     self.send_command(Message(RequestType.START_CLIMAX_TOP, DeviceType.TOP))
                     self.climax_state = ClimaxState.RUNNING
                     print("[CLIMAX] CLIMAX_READY received → START_CLIMAX_CENTER & START_CLIMAX_TOP sent.")
             return
 
-        # ---- CLIMAX_DONE_CENTER from CENTER ----
         if verb == "REQUEST" and cmd == RequestType.CLIMAX_DONE_CENTER.value and dev == DeviceType.CENTER:
             with self.lock:
                 self.climax_done_center = True
@@ -382,7 +434,6 @@ class MacMiniController:
                 self._check_climax_completion()
             return
 
-        # ---- CLIMAX_DONE_TOP from TOP ----
         if verb == "REQUEST" and cmd == RequestType.CLIMAX_DONE_TOP.value and dev == DeviceType.TOP:
             with self.lock:
                 self.climax_done_top = True
@@ -390,18 +441,15 @@ class MacMiniController:
                 self._check_climax_completion()
             return
 
-        # Silently ignore others
         if DEBUG_FRAMES:
             print(f"[RECEIVED] (ignored) {src}->{dest} {verb}:{cmd}")
 
     # ---------------- CLIMAX COMPLETION CHECK ----------------
     def _check_climax_completion(self):
-        """Reset the show only when both CENTER and TOP report done."""
         both = self.climax_done_center and self.climax_done_top
         if both:
             print("[CLIMAX] Both CENTER and TOP done → resetting show state…")
             self._reset_show_cycle()
-            # Snapshot after reset so we know peaks should work
             print(f"[RESET] stars_collected={self.stars_collected} "
                   f"climax_state={self.climax_state.name} "
                   f"pending_confirms={len(self.pending_confirms)}")
@@ -425,7 +473,6 @@ class MacMiniController:
                 star.confirmed_at = time.time()
                 star.last_warn = None
                 print(f"[ACK] {arm.value} confirmed SEND_STAR; waiting for STAR_ARRIVED")
-            # else: duplicate/late confirm — ignore
 
     def _on_star_arrived(self, arm: DeviceType):
         with self.lock:
@@ -434,24 +481,37 @@ class MacMiniController:
                 star.awaiting_arrival = False
 
                 if self.climax_state == ClimaxState.IDLE:
-                    # Normal counting + visuals only while not in buildup/climax
                     self.stars_collected += 1
                     print(f"[ARRIVED] {arm.value} animation complete. Total stars: {self.stars_collected}")
 
-                    self.send_command(Message(RequestType.ADD_STAR_TOP, DeviceType.TOP))
-                    self.send_command(Message(RequestType.ADD_STAR_CENTER, DeviceType.CENTER))
+                    # Capture brightness before reset for center params
+                    b = star.brightness
+                    size = self._size_from_brightness(b)
 
-                    # Trigger pre-climax when threshold reached
+                    # TOP (params optional; left empty unless your TOP needs them)
+                    self.send_command(Message(RequestType.ADD_STAR_TOP, DeviceType.TOP))
+
+                    # CENTER with its own param forms
+                    self.send_command(Message(RequestType.ADD_STAR_CENTER, DeviceType.CENTER,
+                                              params={
+                                                  "SPEED": self._rand_speed_for(DeviceType.CENTER),
+                                                  "COLOR": self.show_color_center,   # hex
+                                                  "BRIGHTNESS": b,
+                                                  "SIZE": size
+                                              }))
+
                     if self.stars_collected >= MAX_STARS_FOR_CLIMAX:
-                        self.send_command(Message(RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER))
+                        self.send_command(Message(RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER,
+                                                  params={
+                                                      "SPEED": self._rand_speed_for(DeviceType.CENTER),
+                                                      "COLOR": self.show_color_center
+                                                  }))
                         self.climax_state = ClimaxState.BUILDUP_WAIT_ACK
                         print(f"[CLIMAX] Threshold {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached → BUILDUP_CLIMAX_CENTER.")
                 else:
-                    # During buildup/climax: do not count or add visuals
                     print(f"[ARRIVED] {arm.value} (ignored for count; climax phase active)")
 
                 self._reset_arm(star)
-            # else: late/stray arrival — ignore
 
     # ---------------- RESET HELPERS ----------------
     def _reset_arm(self, star: Star):
@@ -466,16 +526,13 @@ class MacMiniController:
         star.awaiting_arrival = False
         star.confirmed_at = None
         star.last_warn = None
+        # keep last speed/color/size config for next star unless reinitialized
 
     def _reset_show_cycle(self):
-        """Reset all state so a new cycle can begin immediately."""
         with self.lock:
-            # Reset all arms
-            for star in self.arms.values():
-                self._reset_arm(star)
-            # Clear pending confirmations (cancel any retries still in-flight)
+            for s in self.arms.values():
+                self._reset_arm(s)
             self.pending_confirms.clear()
-            # Reset counters and climax state and latches
             self.stars_collected = 0
             self.climax_state = ClimaxState.IDLE
             self.climax_done_center = False
@@ -486,19 +543,16 @@ class MacMiniController:
         if now < self._next_keepalive_due:
             return
         self._next_keepalive_due = now + self.keepalive_interval
-
-        # Send PING to all devices, but don't spam if a PING is already pending for that device
         for dev in ALL_DEVICES:
             key = (dev.value, RequestType.PING.value)
             if key in self.pending_confirms:
-                continue  # still waiting for previous ping confirm
+                continue
             self.send_command(Message(RequestType.PING, dev))
-
         print(f"[PING] Keep-alive sent to all devices (interval={int(self.keepalive_interval)}s).")
 
     def set_keepalive_interval(self, seconds: float):
         with self.lock:
-            self.keepalive_interval = max(5.0, float(seconds))  # clamp to >= 5s
+            self.keepalive_interval = max(5.0, float(seconds))
             self._next_keepalive_due = time.time() + self.keepalive_interval
         print(f"[PING] Keep-alive interval set to {int(self.keepalive_interval)}s.")
 
@@ -514,13 +568,6 @@ class MacMiniController:
         else:
             print(f"[PING][WARN] {dev.value} missed keep-alive (fail {h['failures']}/{HEALTH_FAIL_THRESHOLD}).")
 
-    def _mark_device_seen(self, dev: DeviceType):
-        if dev not in self.health:
-            return
-        self.health[dev]["online"] = True
-        self.health[dev]["failures"] = 0
-        self.health[dev]["last_seen"] = time.time()
-
     def _print_health(self):
         print("\n[HEALTH] Device status:")
         for dev in ALL_DEVICES:
@@ -534,7 +581,6 @@ class MacMiniController:
     def trigger_peak(self, arm_num: int):
         arm = DeviceType[f"ARM{arm_num}"]
         with self.lock:
-            # During buildup/climax we ignore peaks
             if self.climax_state in (ClimaxState.BUILDUP_WAIT_ACK, ClimaxState.BUILDUP_WAIT_READY, ClimaxState.RUNNING):
                 print(f"[PEAK] Ignored: climax phase is active ({self.climax_state.name})")
                 return
@@ -543,31 +589,47 @@ class MacMiniController:
             now = time.time()
 
             if star.state == StarState.IDLE:
-                # Start new star: wait for MAKE_STAR confirm before allowing updates
                 star.state = StarState.WAIT_CONFIRM
                 star.active = True
                 star.brightness = UPDATE_STEP
-                star.start_time = None           # timers start on confirm
+                star.start_time = None
                 star.last_peak_time = None
-                star.retry_count = 0
-                star.awaiting_ack = False
-                star.awaiting_arrival = False
-                self.send_command(Message(RequestType.MAKE_STAR, arm, star.brightness))
+                # Initialize per-star params
+                star.speed = self._rand_speed_for(arm)
+                # Use current show color in ARM form
+                star.color_int = int(self.show_color_arm)
+                star.size = self._size_from_brightness(star.brightness)
+
+                self.send_command(Message(
+                    RequestType.MAKE_STAR, arm,
+                    params={
+                        "SPEED": star.speed,
+                        "COLOR": star.color_int,          # int for ARM
+                        "BRIGHTNESS": star.brightness,
+                        "SIZE": star.size
+                    }
+                ))
                 print(f"[PEAK] New star on {arm.value} (brightness={star.brightness})")
 
             elif star.state == StarState.WAIT_CONFIRM:
                 print(f"[PEAK] Ignored: {arm.value} waiting for MAKE_STAR confirm")
 
             elif star.state == StarState.ACTIVE:
-                # Guard: block updates if MAKE_STAR is still pending confirm
                 if (arm.value, RequestType.MAKE_STAR.value) in self.pending_confirms:
                     print(f"[PEAK] Ignored: {arm.value} MAKE_STAR not yet confirmed (pending ACK)")
                     return
-
-                # Update existing star
                 star.brightness = min(star.brightness + UPDATE_STEP, MAX_BRIGHTNESS)
                 star.last_peak_time = now
-                self.send_command(Message(RequestType.UPDATE_STAR, arm, star.brightness))
+                star.size = self._size_from_brightness(star.brightness)
+                self.send_command(Message(
+                    RequestType.UPDATE_STAR, arm,
+                    params={
+                        "SPEED": star.speed,
+                        "COLOR": star.color_int,
+                        "BRIGHTNESS": star.brightness,
+                        "SIZE": star.size
+                    }
+                ))
                 print(f"[PEAK] Update {arm.value} -> brightness={star.brightness}")
 
             else:
@@ -583,19 +645,17 @@ class MacMiniController:
                 for key, tracker in list(self.pending_confirms.items()):
                     if (now - tracker.last_sent) >= ACK_TIMEOUT:
                         if tracker.retries < MAX_SEND_RETRIES:
-                            # Increment retry count and re-send same command with same brightness
                             self.pending_confirms[key].retries += 1
                             self.pending_confirms[key].last_sent = now
-                            self.send_command(Message(tracker.cmd, tracker.device, tracker.brightness))
+                            self.send_command(Message(tracker.cmd, tracker.device,
+                                                      brightness=tracker.brightness,
+                                                      params=tracker.params))
                         else:
-                            # Give up on this command
                             del self.pending_confirms[key]
                             print(f"[ERROR] {tracker.device.value} no CONFIRM after {MAX_SEND_RETRIES} {tracker.cmd.value} attempts.")
-                            # If SEND_STAR fails for an arm, reset that arm so it doesn't get stuck
                             if tracker.cmd == RequestType.SEND_STAR and tracker.device.name.startswith("ARM"):
                                 with self.lock:
                                     self._reset_arm(self.arms[tracker.device])
-                            # If PING failed, bump health failure counter
                             if tracker.cmd == RequestType.PING:
                                 self._handle_ping_failure(tracker.device)
 
@@ -607,7 +667,6 @@ class MacMiniController:
                 with self.lock:
                     for star in self.arms.values():
                         if star.state == StarState.ACTIVE:
-                            # Auto-dispatch rules after MAKE_STAR confirmed
                             elapsed = now - (star.start_time or now)
                             idle = now - (star.last_peak_time or now)
                             if elapsed >= STAR_SEND_TIME or idle >= PEAK_TIMEOUT or star.brightness >= MAX_BRIGHTNESS:
@@ -616,7 +675,6 @@ class MacMiniController:
                                 star.awaiting_ack = True
                                 star.retry_count = 0
                                 send_queue.append(star)
-
                         elif star.state == StarState.IN_ANIMATION:
                             if star.confirmed_at:
                                 waited = now - star.confirmed_at
@@ -632,7 +690,6 @@ class MacMiniController:
                 for s in send_queue:
                     self._try_send_star(s)
 
-                # Climax state transitions driven by confirms/requests
                 if self.climax_state == ClimaxState.BUILDUP_WAIT_ACK:
                     if (DeviceType.CENTER.value, RequestType.BUILDUP_CLIMAX_CENTER.value) not in self.pending_confirms:
                         self.climax_state = ClimaxState.BUILDUP_WAIT_READY
@@ -643,8 +700,15 @@ class MacMiniController:
             self.shutdown()
 
     def _try_send_star(self, star: Star):
-        # Send SEND_STAR via the same command path (tracked/retried generically)
-        self.send_command(Message(RequestType.SEND_STAR, star.arm, star.brightness))
+        self.send_command(Message(
+            RequestType.SEND_STAR, star.arm,
+            params={
+                "SPEED": star.speed,
+                "COLOR": star.color_int,
+                "BRIGHTNESS": star.brightness,
+                "SIZE": star.size
+            }
+        ))
         star.last_send_attempt = time.time()
         star.retry_count += 1
 
@@ -655,10 +719,12 @@ class MacMiniController:
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             try:
-                tty.setraw(fd)
+                # Use cbreak to keep Ctrl+C working
+                tty.setcbreak(fd)
                 i, _, _ = select.select([sys.stdin], [], [], 0.1)
                 if i:
-                    return sys.stdin.read(1)
+                    ch = sys.stdin.read(1)
+                    return ch
                 return None
             finally:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -678,7 +744,6 @@ class MacMiniController:
                         self._reset_show_cycle()
                     print("[DEV] Manual reset via keyboard.")
                 elif key in ("k", "K"):
-                    # Cycle through handy presets for on-site tweaking
                     presets = [30.0, 60.0, 120.0]
                     try:
                         idx = presets.index(self.keepalive_interval)
@@ -687,6 +752,11 @@ class MacMiniController:
                         self.set_keepalive_interval(60.0)
                 elif key in ("h", "H"):
                     self._print_health()
+                elif key in ("c", "C"):
+                    # example: quick color cycle for testing
+                    new_val = (self.show_color_arm + 32) % 256
+                    self.set_show_color(arm_value=new_val)
+                    print(f"[COLOR] show_color_arm={self.show_color_arm} show_color_center={self.show_color_center}")
         except KeyboardInterrupt:
             self.shutdown()
 
