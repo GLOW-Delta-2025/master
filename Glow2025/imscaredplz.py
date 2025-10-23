@@ -14,8 +14,8 @@ Behavior:
 - When conditions hit, we SEND_STAR and wait for CONFIRM with retries (ACK_TIMEOUT).
 - Only after STAR_ARRIVED do we count the star and update TOP & CENTER.
 - When stars_collected >= MAX_STARS_FOR_CLIMAX:
-    * Send BUILDUP_CLIMAX_CENTER (retry/confirm).
-    * Wait for CLIMAX_READY from CENTER, then send START_CLIMAX_CENTER & START_CLIMAX_TOP.
+    * Send BUILDUP_CLIMAX_CENTER (NO PARAMS; retry/confirm).
+    * Wait for CLIMAX_READY from CENTER, then send START_CLIMAX_CENTER (NO PARAMS) & START_CLIMAX_TOP (NO PARAMS).
     * Arms are disabled during buildup/climax.
     * Wait for BOTH CLIMAX_DONE_CENTER and CLIMAX_DONE_TOP, then reset the whole show state.
 
@@ -24,7 +24,10 @@ Robustness:
 - WARN if STAR_ARRIVED takes too long; ERROR & reset if it never comes.
 - Idempotent handlers (ignore duplicates/late messages safely).
 - Keep-alive PINGs to all devices on a configurable interval; health tracking.
-- Param payloads per device: ARM (speed 2–10, int color), CENTER (speed 8–25, hex color).
+- Param payloads per device:
+    * ARM:    SPEED 2–10 (int), COLOR int (0–255), BRIGHTNESS, SIZE (1–20)
+    * CENTER: (only for ADD_STAR_CENTER) SPEED 8–25 (int), COLOR hex, BRIGHTNESS, SIZE
+    * TOP:    (only for ADD_STAR_TOP)    COLOR int (0–255), BRIGHTNESS, SIZE
 """
 
 import time
@@ -63,7 +66,7 @@ CENTER_SPEED_MIN, CENTER_SPEED_MAX = 8, 25
 
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-23-PARAMS-ARM-CENTER"
+VERSION = "2025-10-23-NO-PARAMS-IN-CLIMAX"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -91,10 +94,10 @@ class RequestType(Enum):
     ADD_STAR_CENTER = "ADD_STAR_CENTER"
 
     # Climax flow
-    BUILDUP_CLIMAX_CENTER = "BUILDUP_CLIMAX_CENTER"  # Mac → CENTER
+    BUILDUP_CLIMAX_CENTER = "BUILDUP_CLIMAX_CENTER"  # Mac → CENTER (NO PARAMS)
     CLIMAX_READY = "CLIMAX_READY"                    # CENTER → Mac (REQUEST)
-    START_CLIMAX_CENTER = "START_CLIMAX_CENTER"      # Mac → CENTER
-    START_CLIMAX_TOP = "START_CLIMAX_TOP"            # Mac → TOP
+    START_CLIMAX_CENTER = "START_CLIMAX_CENTER"      # Mac → CENTER (NO PARAMS)
+    START_CLIMAX_TOP = "START_CLIMAX_TOP"            # Mac → TOP (NO PARAMS)
     CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # CENTER → Mac (REQUEST)
     CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # TOP → Mac (REQUEST)
 
@@ -159,7 +162,6 @@ class Star:
         self.last_peak_time: Optional[float] = None
 
         # Device-specific star attributes
-        # SPEED/COLOR/SIZE will be assigned when the star starts
         self.speed: int = ARM_SPEED_MIN
         self.color_int: int = 128  # 0-255 (ARM form)
         self.size: int = 5
@@ -359,7 +361,8 @@ class MacMiniController:
         if token is None:
             return None
         t = token.strip()
-        if t.startswith("") and t.endswith(""):
+        # fix: actually strip surrounding brackets
+        if t.startswith("[") and t.endswith("]"):
             t = t[1:-1]
         return t
 
@@ -419,12 +422,11 @@ class MacMiniController:
         if verb == "REQUEST" and cmd == RequestType.CLIMAX_READY.value and dev == DeviceType.CENTER:
             with self.lock:
                 if self.climax_state == ClimaxState.BUILDUP_WAIT_READY:
-                    self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER,
-                                              params={"SPEED": self._rand_speed_for(DeviceType.CENTER),
-                                                      "COLOR": self.show_color_center}))
+                    # START CLIMAX (NO PARAMS)
+                    self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER))
                     self.send_command(Message(RequestType.START_CLIMAX_TOP, DeviceType.TOP))
                     self.climax_state = ClimaxState.RUNNING
-                    print("[CLIMAX] CLIMAX_READY received → START_CLIMAX_CENTER & START_CLIMAX_TOP sent.")
+                    print("[CLIMAX] CLIMAX_READY received → START_CLIMAX_CENTER & START_CLIMAX_TOP (no params) sent.")
             return
 
         if verb == "REQUEST" and cmd == RequestType.CLIMAX_DONE_CENTER.value and dev == DeviceType.CENTER:
@@ -484,30 +486,38 @@ class MacMiniController:
                     self.stars_collected += 1
                     print(f"[ARRIVED] {arm.value} animation complete. Total stars: {self.stars_collected}")
 
-                    # Capture brightness before reset for center params
+                    # Capture brightness before reset for center/top params
                     b = star.brightness
                     size = self._size_from_brightness(b)
 
-                    # TOP (params optional; left empty unless your TOP needs them)
-                    self.send_command(Message(RequestType.ADD_STAR_TOP, DeviceType.TOP))
+                    # TOP — send params (NO SPEED), COLOR in ARM format (int 0–255)
+                    self.send_command(Message(
+                        RequestType.ADD_STAR_TOP, DeviceType.TOP,
+                        params={
+                            "COLOR": star.color_int,
+                            "BRIGHTNESS": b,
+                            "SIZE": size
+                        }
+                    ))
 
-                    # CENTER with its own param forms
-                    self.send_command(Message(RequestType.ADD_STAR_CENTER, DeviceType.CENTER,
-                                              params={
-                                                  "SPEED": self._rand_speed_for(DeviceType.CENTER),
-                                                  "COLOR": self.show_color_center,   # hex
-                                                  "BRIGHTNESS": b,
-                                                  "SIZE": size
-                                              }))
+                    # CENTER with its own param forms (speed + hex color)
+                    self.send_command(Message(
+                        RequestType.ADD_STAR_CENTER, DeviceType.CENTER,
+                        params={
+                            "SPEED": self._rand_speed_for(DeviceType.CENTER),
+                            "COLOR": self.show_color_center,
+                            "BRIGHTNESS": b,
+                            "SIZE": size
+                        }
+                    ))
 
                     if self.stars_collected >= MAX_STARS_FOR_CLIMAX:
-                        self.send_command(Message(RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER,
-                                                  params={
-                                                      "SPEED": self._rand_speed_for(DeviceType.CENTER),
-                                                      "COLOR": self.show_color_center
-                                                  }))
+                        # BUILDUP with NO PARAMS
+                        self.send_command(Message(
+                            RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER
+                        ))
                         self.climax_state = ClimaxState.BUILDUP_WAIT_ACK
-                        print(f"[CLIMAX] Threshold {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached → BUILDUP_CLIMAX_CENTER.")
+                        print(f"[CLIMAX] Threshold {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached → BUILDUP_CLIMAX_CENTER (no params).")
                 else:
                     print(f"[ARRIVED] {arm.value} (ignored for count; climax phase active)")
 
