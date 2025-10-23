@@ -1,0 +1,12 @@
+{
+  "device": 6,
+  "channels": [
+    0,
+    1
+  ],
+  "names": [
+    ""
+  ],
+  "poll_interval": 0.8,
+  "spike_threshold_db": 7.5
+}
