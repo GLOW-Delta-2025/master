@@ -70,9 +70,12 @@ HEALTH_FAIL_THRESHOLD = 3           # consecutive failed pings to mark offlines
 ARM_SPEED_MIN, ARM_SPEED_MAX = 2, 10
 CENTER_SPEED_MIN, CENTER_SPEED_MAX = 8, 25
 
+# Climax timeout (configurable)
+CLIMAX_TIMEOUT_SECONDS = 60.0       # default; can be changed via set_climax_timeout()
+
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-23-NO-PARAMS-IN-CLIMAX"
+VERSION = "2025-10-27-NO-PARAMS-IN-CLIMAX+TIMEOUT"
 # ----------------------------------------
 
 class DeviceType(Enum):
@@ -212,6 +215,8 @@ class MacMiniController:
         self.climax_state = ClimaxState.IDLE
         self.climax_done_center = False
         self.climax_done_top = False
+        self.climax_started_at: Optional[float] = None
+        self.climax_timeout_seconds = CLIMAX_TIMEOUT_SECONDS
 
         self._stop = False
 
@@ -220,23 +225,16 @@ class MacMiniController:
         if AudioProcessorLib is not None:
             try:
                 # Map audio channels to arms via simple modulo mapping.
-                # Default channels are provided by the library; no special config here.
                 self.audio_lib = AudioProcessorLib(start_stream=True, device=2, channels=[1,4,5,6,2])
-                # spike callback: (channel_index, spike_obj, avg_db, noise_db)
                 def _spike_cb(ch, spike, avg_db, noise_db):
                     try:
-                        # Map channel -> arm number
-                        # Is index of the channel in the list of channels provided
                         arm_num = self.audio_lib.processor.channels.index(ch) if ch in self.audio_lib.processor.channels else None
-                        # modulo mapping gives 0..NUM_ARMS-1; shift to 1..NUM_ARMS
                         arm_num = (arm_num or 0) + 1
                         print(f"[AUDIO] Spike on channel {ch} -> triggering ARM{arm_num}")
                         self.trigger_peak(arm_num)
                     except Exception as e:
                         print(f"[AUDIO][ERROR] spike callback failed: {e}")
-
                 self.audio_lib.register_spike_callback(_spike_cb)
-                # start polling thread
                 self.audio_lib.start()
                 print("[AUDIO] AudioProcessorLib started and spike callback registered.")
             except Exception as e:
@@ -268,7 +266,7 @@ class MacMiniController:
     # --------- Helpers: color, speed, size ----------
     def _sync_color_from_arm(self):
         v = int(max(0, min(255, self.show_color_arm)))
-        hexv = f"#{v:02X}{v:02X}{v:02X}"  # grayscale mapping; replace with palette if desired
+        hexv = f"#{v:02X}{v:02X}{v:02X}"
         self.show_color_center = hexv
 
     def _sync_color_from_center(self):
@@ -280,12 +278,12 @@ class MacMiniController:
                 r = int(s[0:2], 16)
                 g = int(s[2:4], 16)
                 b = int(s[4:6], 16)
-                self.show_color_arm = max(0, min(255, (r + g + b) // 3))  # average to 0-255
+                self.show_color_arm = max(0, min(255, (r + g + b) // 3))
             except ValueError:
                 pass
 
     def set_show_color(self, arm_value: Optional[int] = None, center_hex: Optional[str] = None):
-        """Call this from UI/on-site to change color dynamically; keeps both forms in sync."""
+        """Change color dynamically; keeps both forms in sync."""
         with self.lock:
             if arm_value is not None:
                 self.show_color_arm = int(max(0, min(255, arm_value)))
@@ -296,7 +294,6 @@ class MacMiniController:
 
     @staticmethod
     def _size_from_brightness(br: int) -> int:
-        # Linear map 0-255 -> 1-20
         br = max(0, min(255, int(br)))
         return max(1, min(20, int(round(1 + br * (19.0 / 255.0)))))
 
@@ -306,9 +303,13 @@ class MacMiniController:
             return random.randint(CENTER_SPEED_MIN, CENTER_SPEED_MAX)
         return random.randint(ARM_SPEED_MIN, ARM_SPEED_MAX)
 
+    def set_climax_timeout(self, seconds: float):
+        with self.lock:
+            self.climax_timeout_seconds = max(5.0, float(seconds))
+        print(f"[CLIMAX] Timeout set to {int(self.climax_timeout_seconds)}s.")
+
     # ---------------- SEND COMMANDS ----------------
     def send_command(self, msg: Message):
-        # Safety rail: Mac must never send CLIMAX_READY
         if msg.request_type == RequestType.CLIMAX_READY:
             print("[BUGGUARD] Refusing to send CLIMAX_READY from Mac. Expected as incoming CENTER event.")
             return
@@ -322,7 +323,6 @@ class MacMiniController:
             print(f"[ERROR] Serial write failed: {e}")
             return
 
-        # Register/refresh tracker for this REQUEST
         key: PendingKey = (msg.target_device.value, msg.request_type.value)
         now = time.time()
         prev = self.pending_confirms.get(key)
@@ -394,7 +394,6 @@ class MacMiniController:
         if token is None:
             return None
         t = token.strip()
-        # fix: actually strip surrounding brackets
         if t.startswith("[") and t.endswith("]"):
             t = t[1:-1]
         return t
@@ -459,6 +458,7 @@ class MacMiniController:
                     self.send_command(Message(RequestType.START_CLIMAX_CENTER, DeviceType.CENTER))
                     self.send_command(Message(RequestType.START_CLIMAX_TOP, DeviceType.TOP))
                     self.climax_state = ClimaxState.RUNNING
+                    self.climax_started_at = time.time()   # start timeout window
                     print("[CLIMAX] CLIMAX_READY received → START_CLIMAX_CENTER & START_CLIMAX_TOP (no params) sent.")
             return
 
@@ -523,7 +523,7 @@ class MacMiniController:
                     b = star.brightness
                     size = self._size_from_brightness(b)
 
-                    # TOP — send params (NO SPEED), COLOR in ARM format (int 0–255)
+                    # TOP — send params (NO SPEED), COLOR int (0–255)
                     self.send_command(Message(
                         RequestType.ADD_STAR_TOP, DeviceType.TOP,
                         params={
@@ -533,22 +533,19 @@ class MacMiniController:
                         }
                     ))
 
-                    # CENTER with its own param forms (speed + hex color)
+                    # CENTER — note: keys are intentionally lowercase per your current firmware expectation
                     self.send_command(Message(
                         RequestType.ADD_STAR_CENTER, DeviceType.CENTER,
                         params={
                             "speed": self._rand_speed_for(DeviceType.CENTER),
-                            #"COLOR": self.show_color_center,
+                            # "COLOR": self.show_color_center,  # left commented per your current code
                             "brightness": b,
                             "size": size
                         }
                     ))
 
                     if self.stars_collected >= MAX_STARS_FOR_CLIMAX:
-                        # BUILDUP with NO PARAMS
-                        self.send_command(Message(
-                            RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER
-                        ))
+                        self.send_command(Message(RequestType.BUILDUP_CLIMAX_CENTER, DeviceType.CENTER))
                         self.climax_state = ClimaxState.BUILDUP_WAIT_ACK
                         print(f"[CLIMAX] Threshold {self.stars_collected}/{MAX_STARS_FOR_CLIMAX} reached → BUILDUP_CLIMAX_CENTER (no params).")
                 else:
@@ -569,7 +566,6 @@ class MacMiniController:
         star.awaiting_arrival = False
         star.confirmed_at = None
         star.last_warn = None
-        # keep last speed/color/size config for next star unless reinitialized
 
     def _reset_show_cycle(self):
         with self.lock:
@@ -580,6 +576,7 @@ class MacMiniController:
             self.climax_state = ClimaxState.IDLE
             self.climax_done_center = False
             self.climax_done_top = False
+            self.climax_started_at = None
 
     # ---------------- KEEP-ALIVE ----------------
     def _send_keepalives_if_due(self, now: float):
@@ -637,9 +634,7 @@ class MacMiniController:
                 star.brightness = UPDATE_STEP
                 star.start_time = None
                 star.last_peak_time = None
-                # Initialize per-star params
                 star.speed = self._rand_speed_for(arm)
-                # Use current show color in ARM form
                 star.color_int = int(self.show_color_arm)
                 star.size = self._size_from_brightness(star.brightness)
 
@@ -647,7 +642,7 @@ class MacMiniController:
                     RequestType.MAKE_STAR, arm,
                     params={
                         "SPEED": star.speed,
-                        "COLOR": star.color_int,          # int for ARM
+                        "COLOR": star.color_int,
                         "BRIGHTNESS": star.brightness,
                         "SIZE": star.size
                     }
@@ -674,7 +669,6 @@ class MacMiniController:
                     }
                 ))
                 print(f"[PEAK] Update {arm.value} -> brightness={star.brightness}")
-
             else:
                 print(f"[PEAK] Ignored: {arm.value} is {star.state.name}")
 
@@ -714,6 +708,7 @@ class MacMiniController:
                                     self.climax_state = ClimaxState.IDLE
                                     self.climax_done_center = False
                                     self.climax_done_top = False
+                                    self.climax_started_at = None
                                 print("[CLIMAX][RECOVER] Aborted buildup (no CONFIRM). Show state reset to IDLE.")
 
                             # Health handling for PINGs
@@ -751,10 +746,20 @@ class MacMiniController:
                 for s in send_queue:
                     self._try_send_star(s)
 
+                # Transition after BUILDUP ack
                 if self.climax_state == ClimaxState.BUILDUP_WAIT_ACK:
                     if (DeviceType.CENTER.value, RequestType.BUILDUP_CLIMAX_CENTER.value) not in self.pending_confirms:
                         self.climax_state = ClimaxState.BUILDUP_WAIT_READY
                         print("[CLIMAX] BUILDUP_CLIMAX_CENTER confirmed → waiting for CLIMAX_READY from CENTER.")
+
+                # ---- CLIMAX timeout check ----
+                with self.lock:
+                    if self.climax_state == ClimaxState.RUNNING and self.climax_started_at is not None:
+                        waited = time.time() - self.climax_started_at
+                        if waited > self.climax_timeout_seconds:
+                            print(f"[CLIMAX][TIMEOUT] No DONE from TOP and/or CENTER after {int(self.climax_timeout_seconds)}s "
+                                  f"(center_done={self.climax_done_center}, top_done={self.climax_done_top}). Resetting show state.")
+                            self._reset_show_cycle()
 
                 time.sleep(0.1)
         except KeyboardInterrupt:
@@ -780,7 +785,6 @@ class MacMiniController:
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             try:
-                # Use cbreak to keep Ctrl+C working
                 tty.setcbreak(fd)
                 i, _, _ = select.select([sys.stdin], [], [], 0.1)
                 if i:
@@ -814,17 +818,20 @@ class MacMiniController:
                 elif key in ("h", "H"):
                     self._print_health()
                 elif key in ("c", "C"):
-                    # example: quick color cycle for testing
                     new_val = (self.show_color_arm + 32) % 256
                     self.set_show_color(arm_value=new_val)
                     print(f"[COLOR] show_color_arm={self.show_color_arm} show_color_center={self.show_color_center}")
+                elif key in ("t", "T"):
+                    # quick test: cycle climax timeout presets
+                    presets = [30.0, 60.0, 90.0, 120.0]
+                    self.set_climax_timeout(presets[(presets.index(self.climax_timeout_seconds) + 1) % len(presets)]
+                                            if self.climax_timeout_seconds in presets else 60.0)
         except KeyboardInterrupt:
             self.shutdown()
 
     def shutdown(self):
         print("\n[MAC MINI] Shutting down...")
         self._stop = True
-        # stop audio lib if running
         try:
             if self.audio_lib is not None:
                 self.audio_lib.stop()
