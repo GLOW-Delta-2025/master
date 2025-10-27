@@ -694,11 +694,29 @@ class MacMiniController:
                                                       brightness=tracker.brightness,
                                                       params=tracker.params))
                         else:
+                            # Retries exhausted: clean up and recover appropriately
                             del self.pending_confirms[key]
                             print(f"[ERROR] {tracker.device.value} no CONFIRM after {MAX_SEND_RETRIES} {tracker.cmd.value} attempts.")
-                            if tracker.cmd == RequestType.SEND_STAR and tracker.device.name.startswith("ARM"):
+
+                            # Arm safety: reset arm so it doesn't hang in WAIT_CONFIRM/ACTIVE/DISPATCHING
+                            if tracker.device.name.startswith("ARM") and tracker.cmd in (
+                                RequestType.MAKE_STAR,
+                                RequestType.UPDATE_STAR,
+                                RequestType.SEND_STAR,
+                            ):
                                 with self.lock:
                                     self._reset_arm(self.arms[tracker.device])
+                                print(f"[RECOVER] {tracker.device.value} reset after {tracker.cmd.value} failed.")
+
+                            # Climax safety: abort buildup if CENTER never confirms
+                            if tracker.cmd == RequestType.BUILDUP_CLIMAX_CENTER and tracker.device == DeviceType.CENTER:
+                                with self.lock:
+                                    self.climax_state = ClimaxState.IDLE
+                                    self.climax_done_center = False
+                                    self.climax_done_top = False
+                                print("[CLIMAX][RECOVER] Aborted buildup (no CONFIRM). Show state reset to IDLE.")
+
+                            # Health handling for PINGs
                             if tracker.cmd == RequestType.PING:
                                 self._handle_ping_failure(tracker.device)
 
