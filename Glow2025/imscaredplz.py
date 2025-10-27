@@ -71,11 +71,11 @@ ARM_SPEED_MIN, ARM_SPEED_MAX = 2, 10
 CENTER_SPEED_MIN, CENTER_SPEED_MAX = 8, 25
 
 # Climax timeout (configurable)
-CLIMAX_TIMEOUT_SECONDS = 60.0       # default; can be changed via set_climax_timeout()
+CLIMAX_TIMEOUT_SECONDS = 30.0       # default; can be changed via set_climax_timeout()
 
 # Logging
 DEBUG_FRAMES = False       # set True to see ignored frames/noise
-VERSION = "2025-10-27-NO-PARAMS-IN-CLIMAX+TIMEOUT"
+VERSION = "2025-10-27"
 # ----------------------------------------
 
 class DeviceType(Enum):
