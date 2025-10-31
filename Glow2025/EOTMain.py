@@ -45,7 +45,7 @@ except Exception:
     AudioProcessorLib = None
  
 # ---------------- CONFIG ----------------
-SERIAL_PORT = "/dev/tty.usbmodem83171401"
+SERIAL_PORT = "/dev/tty.usbmodem14301" #"/dev/tty.usbmodem83171401"
 SERIAL_BAUD = 115200
  
 NUM_ARMS = 5
@@ -849,4 +849,3 @@ if __name__ == "__main__":
     controller = MacMiniController()
     threading.Thread(target=controller.run, daemon=True).start()
     controller.input_loop()
- 
