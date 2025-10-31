@@ -38,6 +38,11 @@ central-unit/
    pip install -r requirements.txt
    ```
 
+4. Select the right serial port:
+   ```bash
+   ls /dev/tty.*/
+   ```
+
 ## Running the Central Unit
 Run the main script:
 ```bash

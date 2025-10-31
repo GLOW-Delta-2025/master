@@ -18,7 +18,7 @@ import time
 import os
 from typing import Dict, Any
 
-from flask import Flask, jsonify, request, send_file, render_template_string
+from flask import Flask, jsonify, request, send_file, render_template
 
 # Try to import the controller module/class from the user's script.
 # Assumes your main script is saved as macmini_controller.py and exposes MacMiniController.
@@ -151,11 +151,19 @@ def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
             result["errors"][k] = str(e)
     return result
 
+import time
+from typing import Dict, Any
+
 def get_runtime_status() -> Dict[str, Any]:
     """Return a snapshot of controller runtime status: health, arms, pending confirms etc."""
     c = controller
+    now = time.time()
+
     with c.lock:
+        # Build health info
         health = {dev.value: data.copy() for dev, data in c.health.items()}
+
+        # Arms info
         arms = {}
         for arm_dev, star in c.arms.items():
             arms[arm_dev.value] = {
@@ -164,12 +172,21 @@ def get_runtime_status() -> Dict[str, Any]:
                 "last_peak_time": getattr(star, "last_peak_time", None),
                 "awaiting_ack": getattr(star, "awaiting_ack", None),
                 "awaiting_arrival": getattr(star, "awaiting_arrival", None),
-                "retry_count": getattr(star, "retry_count", None)
+                "retry_count": getattr(star, "retry_count", None),
             }
+
+        # Pending confirms
         pending = [
-            {"device": t.device.value, "cmd": t.cmd.value, "last_sent": t.last_sent, "retries": t.retries}
+            {
+                "device": t.device.value,
+                "cmd": t.cmd.value,
+                "last_sent": t.last_sent,
+                "retries": t.retries,
+            }
             for t in c.pending_confirms.values()
         ]
+
+        # Base status dict
         status = {
             "stars_collected": c.stars_collected,
             "climax_state": c.climax_state.name,
@@ -182,7 +199,24 @@ def get_runtime_status() -> Dict[str, Any]:
             "pending_count": len(pending),
             "version": getattr(controller_module, "VERSION", None),
         }
+
+        # --- Build human-readable section ---
+        lines = ["[HEALTH] Device status:"]
+        for dev, data in health.items():
+            failures = data.get("failures", 0)
+            online = data.get("online", False)
+            last_seen = data.get("last_seen", 0.0)
+            seconds_ago = now - last_seen
+            lines.append(
+                f"  - {dev:<7} {'ONLINE' if online else 'OFFLINE'}   "
+                f"failures={failures:<2}  last_seen= {seconds_ago:4.1f}s ago"
+            )
+
+        # Add to status
+        status["health_summary"] = "\n".join(lines)
+
     return status
+
 
 # --- REST API ---
 @app.route("/api/config", methods=["GET"])
@@ -271,253 +305,9 @@ def api_set_color():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- Simple SPA for UI (single HTML) ---
-INDEX_HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Glow Controller — Web UI</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 18px; background:#0f1720; color:#e6eef8; }
-    .card { background:#0b1220; border-radius:10px; padding:14px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); margin-bottom:12px; }
-    input, select { padding:8px; border-radius:6px; border:1px solid #223; background:#081018; color:#e6eef8; width:100%; box-sizing:border-box; }
-    label { font-size:13px; color:#bcd; display:block; margin-bottom:6px; }
-    .grid { display:grid; grid-template-columns: 1fr 320px; gap:12px; }
-    .btn { background:#1f6feb; color:white; border:none; padding:10px 12px; border-radius:8px; cursor:pointer; }
-    .btn-ghost { background:transparent; border:1px solid #234; color:#cfe; }
-    .muted { color:#9db; font-size:13px; }
-    .flex { display:flex; gap:8px; align-items:center; }
-    textarea { width:100%; min-height:120px; background:#06101a; color:#dff; border-radius:8px; padding:10px; border:1px solid #123; }
-    pre { background:#02060a; padding:12px; border-radius:8px; overflow:auto; max-height:300px; }
-  </style>
-</head>
-<body>
-  <h2>Glow — Mac Mini Controller (Web UI)</h2>
-  <div class="grid">
-    <div>
-      <div class="card">
-        <h3>Live Status</h3>
-        <div id="status">loading…</div>
-        <div style="margin-top:8px;" class="flex">
-          <button class="btn" onclick="refreshStatus()">Refresh</button>
-          <button class="btn-ghost" onclick="doReset()">Reset Show</button>
-          <button class="btn-ghost" onclick="document.getElementById('manualPeakArm').value=1">Manual Peak (choose arm below)</button>
-          <select id="manualPeakArm" style="width:120px;">
-            <option value="1">ARM1</option><option value="2">ARM2</option><option value="3">ARM3</option><option value="4">ARM4</option><option value="5">ARM5</option>
-          </select>
-          <button class="btn" onclick="triggerPeak()">Trigger Peak</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Runtime Controls</h3>
-        <div style="display:flex;gap:8px">
-          <input id="colorArm" placeholder="show_color_arm (0-255)">
-          <input id="colorCenter" placeholder="show_color_center (#RRGGBB)">
-        </div>
-        <div style="margin-top:8px" class="flex">
-          <button class="btn" onclick="setColor()">Apply Color</button>
-          <button class="btn-ghost" onclick="loadConfig()">Load saved config</button>
-          <button class="btn-ghost" onclick="saveConfig()">Save editable config to disk</button>
-        </div>
-        <div style="margin-top:10px;">
-          <label class="muted">Climax timeout (s)</label>
-          <input id="climaxTimeout" type="number" min="5">
-          <div style="margin-top:6px" class="flex">
-            <button class="btn" onclick="setClimaxTimeout()">Set</button>
-            <button class="btn-ghost" onclick="setKeepalive(30)">Set Keepalive 30s</button>
-            <button class="btn-ghost" onclick="setKeepalive(60)">Set Keepalive 60s</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Editable Config</h3>
-        <div id="configFields">loading…</div>
-        <div style="margin-top:8px;" class="flex">
-          <button class="btn" onclick="applyConfig()">Apply changes</button>
-          <button class="btn-ghost" onclick="applyConfig(true)">Apply + Save</button>
-        </div>
-        <p class="muted">Tip: changes attempt to update module globals and controller attributes. Some constants are used at startup.</p>
-      </div>
-    </div>
-
-    <div>
-      <div class="card">
-        <h3>Pending confirms & logs</h3>
-        <pre id="pending">loading…</pre>
-      </div>
-
-      <div class="card">
-        <h3>Health / Arms snapshot</h3>
-        <pre id="health">loading…</pre>
-      </div>
-
-      <div class="card">
-        <h3>Raw config JSON</h3>
-        <textarea id="rawConfig"></textarea>
-      </div>
-    </div>
-  </div>
-
-<script>
-async function fetchJson(path, opts) {
-  const r = await fetch(path, opts);
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error('HTTP ' + r.status + ': ' + t);
-  }
-  return r.json();
-}
-
-async function refreshStatus() {
-  try {
-    const s = await fetchJson('/api/status');
-    document.getElementById('status').innerText = 'stars_collected: ' + s.stars_collected + '\\nclimax_state: ' + s.climax_state + '\\nkeepalive_interval: ' + s.keepalive_interval + '\\npending: ' + s.pending_count;
-    document.getElementById('pending').innerText = JSON.stringify(s.pending_confirms, null, 2);
-    document.getElementById('health').innerText = JSON.stringify({health: s.health, arms: s.arms}, null, 2);
-    // populate some small fields
-    document.getElementById('colorArm').value = s.health ? '' : '';
-    document.getElementById('climaxTimeout').value = s.climax_timeout_seconds || '';
-  } catch (e) {
-    document.getElementById('status').innerText = 'ERROR: ' + e.message;
-  }
-}
-
-async function loadConfig() {
-  try {
-    const cfg = await fetchJson('/api/config');
-    // build the fields
-    const fieldsDiv = document.getElementById('configFields');
-    fieldsDiv.innerHTML = '';
-    window._currentConfig = cfg;
-    const editableKeys = Object.keys(cfg).filter(k => k !== 'runtime');
-    editableKeys.forEach(k => {
-      const v = cfg[k];
-      const id = 'f_' + k;
-      const wrapper = document.createElement('div');
-      wrapper.style.marginBottom = '8px';
-      wrapper.innerHTML = `<label>${k}</label><input id="${id}" value="${v===null?'':v}">`;
-      fieldsDiv.appendChild(wrapper);
-    });
-    document.getElementById('rawConfig').value = JSON.stringify(cfg, null, 2);
-  } catch (e) {
-    alert('Load config failed: ' + e.message);
-  }
-}
-
-async function applyConfig(save=false) {
-  // gather fields from configFields
-  const nodes = document.querySelectorAll('#configFields input');
-  const payload = {};
-  nodes.forEach(n => {
-    const k = n.id.slice(2);
-    if (n.value !== '') payload[k] = n.value;
-  });
-  try {
-    const res = await fetchJson('/api/config' + (save ? '?save=1' : ''), {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    alert('Apply result: ' + JSON.stringify(res));
-  } catch (e) {
-    alert('Apply failed: ' + e.message);
-  }
-}
-
-async function saveConfig() {
-  try {
-    const res = await fetchJson('/api/config/save');
-    alert(JSON.stringify(res));
-  } catch (e) {
-    alert('Save failed: ' + e.message);
-  }
-}
-
-async function triggerPeak() {
-  const arm = document.getElementById('manualPeakArm').value;
-  try {
-    const res = await fetchJson('/api/action/trigger_peak', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({arm: parseInt(arm)})
-    });
-    alert('Triggered: ' + JSON.stringify(res));
-  } catch (e) {
-    alert('Trigger failed: ' + e.message);
-  }
-}
-
-async function doReset() {
-  if (!confirm('Reset show state?')) return;
-  try {
-    const res = await fetchJson('/api/action/reset_show', {method: 'POST'});
-    alert(JSON.stringify(res));
-  } catch (e) {
-    alert('Reset failed: ' + e.message);
-  }
-}
-
-async function setColor() {
-  const av = document.getElementById('colorArm').value;
-  const ch = document.getElementById('colorCenter').value;
-  try {
-    const res = await fetchJson('/api/action/set_color', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({arm_value: av || null, center_hex: ch || null})
-    });
-    alert(JSON.stringify(res));
-  } catch (e) {
-    alert('Set color failed: ' + e.message);
-  }
-}
-
-async function setClimaxTimeout() {
-  const v = parseFloat(document.getElementById('climaxTimeout').value);
-  if (!v) return alert('invalid value');
-  try {
-    const res = await fetchJson('/api/config?save=0', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({CLIMAX_TIMEOUT_SECONDS: v})
-    });
-    alert(JSON.stringify(res));
-  } catch (e) {
-    alert('Set failed: ' + e.message);
-  }
-}
-
-async function setKeepalive(sec) {
-  try {
-    const res = await fetchJson('/api/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({DEFAULT_KEEPALIVE_INTERVAL: sec})
-    });
-    alert(JSON.stringify(res));
-  } catch (e) {
-    alert('Set failed: ' + e.message);
-  }
-}
-
-window.addEventListener('load', () => {
-  loadConfig();
-  refreshStatus();
-  // refresh status periodically
-  setInterval(refreshStatus, 3000);
-});
-</script>
-</body>
-</html>
-"""
-
 @app.route("/")
 def index():
-    return render_template_string(INDEX_HTML)
+    return render_template('index.html')
 
 if __name__ == "__main__":
     print("Starting Web UI on http://127.0.0.1:5000/ (Ctrl+C to quit)")
