@@ -24,7 +24,6 @@ th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
 <button onclick="resetShow()">Reset Show</button>
 <div id="liveStatus">loading…</div>
 <div id="healthStatus">loading…</div>
-<div id="pendingLogs">loading…</div>
 </section>
 
 <section>
@@ -89,10 +88,15 @@ async function fetchStatus() {
         let resp = await fetch("/api/config");
         let cfg = await resp.json();
 
-        // --- Runtime (without health) ---
+        // --- Runtime (without health) in key:value format ---
         let runtimeCopy = {...cfg.runtime};
-        delete runtimeCopy.health;  // remove health from JSON view
-        document.getElementById("liveStatus").innerHTML = "<pre>" + JSON.stringify(runtimeCopy, null, 2) + "</pre>";
+        delete runtimeCopy.health;
+
+        let runtimeText = "";
+        Object.entries(runtimeCopy).forEach(([key, value]) => {
+            runtimeText += `${key.padEnd(20)}: ${value}\n`;
+        });
+        document.getElementById("liveStatus").innerText = runtimeText;
 
         // --- Health Table ---
         let healthHtml = "<table><thead><tr><th>Device</th><th>Status</th><th>Failures</th><th>Last Seen</th></tr></thead><tbody>";
@@ -131,7 +135,7 @@ async function fetchStatus() {
             let tdKey = document.createElement("td"); tdKey.innerText = k;
             let tdVal = document.createElement("td");
             let inp = document.createElement("input");
-            inp.value = cfg[k] ?? ""; // fallback to empty string
+            inp.value = cfg[k] ?? "";
             inp.id = "cfg_" + k;
             tdVal.appendChild(inp);
             tr.appendChild(tdKey); tr.appendChild(tdVal);
@@ -149,6 +153,7 @@ async function fetchStatus() {
         document.getElementById("healthStatus").innerText = "Error loading health.";
     }
 }
+
 
 
 // --- Manual peak & show reset ---
