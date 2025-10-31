@@ -72,8 +72,10 @@ app = Flask(__name__)
 
 # --- Controller config helpers ---
 def get_current_config() -> Dict[str, Any]:
-    cfg = {}
+    cfg: Dict[str, Any] = {}
     mod = controller_module
+
+    # Fetch editable keys from either controller_module or controller
     for k, (mod_name, _) in EDITABLE_KEYS.items():
         if hasattr(mod, mod_name):
             cfg[k] = getattr(mod, mod_name)
@@ -81,14 +83,49 @@ def get_current_config() -> Dict[str, Any]:
             cfg[k] = getattr(controller, mod_name)
         else:
             cfg[k] = None
+
+    # Build runtime health info
+    runtime_health: Dict[str, Dict[str, Any]] = {}
+    if hasattr(controller, "health"):
+        for dev, info in controller.health.items():
+            runtime_health[dev.value] = {
+                "online": bool(info.get("online", False)),
+                "failures": int(info.get("failures", 0)),
+                "last_seen": float(info.get("last_seen", 0))
+            }
+
+    # Safely handle runtime fields
+    stars_collected = getattr(controller, "stars_collected", 0)
+
+    cs = getattr(controller, "climax_state", None)
+    if cs is None:
+        climax_state = None
+    elif hasattr(cs, "name"):
+        climax_state = cs.name
+    else:
+        climax_state = cs  # fallback to raw value
+
+    pending = getattr(controller, "pending_confirms", 0)
+    # Ensure we count correctly if it's a dict/list or just an int
+    if isinstance(pending, (list, dict, set)):
+        pending_confirms = len(pending)
+    else:
+        pending_confirms = int(pending)
+
+    version = getattr(mod, "VERSION", None)
+
     cfg["runtime"] = {
-        "stars_collected": getattr(controller, "stars_collected", None),
-        "climax_state": getattr(controller, "climax_state", None).name if getattr(controller, "climax_state", None) else None,
+        "stars_collected": stars_collected,
+        "climax_state": climax_state,
         "keepalive_interval": getattr(controller, "keepalive_interval", None),
-        "pending_confirms": len(getattr(controller, "pending_confirms", {})),
-        "version": getattr(mod, "VERSION", None)
+        "pending_confirms": pending_confirms,
+        "version": version,
+        "health": runtime_health
     }
+
     return cfg
+
+
 
 def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
     mod = controller_module

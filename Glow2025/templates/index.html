@@ -5,15 +5,13 @@
 <title>EOT Web UI</title>
 <style>
 body { font-family: Arial, sans-serif; margin: 20px; background:#f9f9f9; }
-h1 { text-align: center; }
 h2 { margin-top: 30px; }
 section { background: #fff; padding: 15px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);}
-button { margin: 2px; padding: 5px 10px; cursor:pointer; }
+button { margin: 2px; padding: 5px 10px; }
 input, select { padding: 4px; margin: 2px; }
 table { border-collapse: collapse; width: 100%; }
 th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
-pre { background:#eee; padding:10px; border-radius:6px; overflow-x:auto; }
-#pendingLogs { max-height:200px; overflow-y:auto; background:#f4f4f4; padding:10px; border-radius:6px; }
+#pendingLogs { max-height: 150px; overflow-y: auto; background:#f4f4f4; padding:5px; border-radius:5px; margin-top:5px; font-family:monospace; font-size:12px; }
 </style>
 </head>
 <body>
@@ -25,8 +23,8 @@ pre { background:#eee; padding:10px; border-radius:6px; overflow-x:auto; }
 <button onclick="fetchStatus()">Refresh</button>
 <button onclick="resetShow()">Reset Show</button>
 <div id="liveStatus">loading…</div>
-<div id="healthStatus">loading health…</div>
-<div id="pendingLogs">loading logs…</div>
+<div id="healthStatus">loading…</div>
+<div id="pendingLogs">loading…</div>
 </section>
 
 <section>
@@ -85,83 +83,106 @@ pre { background:#eee; padding:10px; border-radius:6px; overflow-x:auto; }
 </section>
 
 <script>
+// --- Live Status & Health ---
 async function fetchStatus() {
     try {
         let resp = await fetch("/api/config");
         let cfg = await resp.json();
 
-        document.getElementById("liveStatus").innerHTML = "<pre>" + JSON.stringify(cfg.runtime,null,2) + "</pre>";
+        // --- Runtime (without health) ---
+        let runtimeCopy = {...cfg.runtime};
+        delete runtimeCopy.health;  // remove health from JSON view
+        document.getElementById("liveStatus").innerHTML = "<pre>" + JSON.stringify(runtimeCopy, null, 2) + "</pre>";
 
-        // Health display
-        let healthHtml = "<pre>";
+        // --- Health Table ---
+        let healthHtml = "<table><thead><tr><th>Device</th><th>Status</th><th>Failures</th><th>Last Seen</th></tr></thead><tbody>";
         if(cfg.runtime && cfg.runtime.health){
-            for(let dev in cfg.runtime.health){
-                let h = cfg.runtime.health[dev];
-                healthHtml += `${dev}: ${h.online?"ONLINE":"OFFLINE"}  failures=${h.failures}\n`;
-            }
+            Object.entries(cfg.runtime.health).forEach(([dev, h]) => {
+                let color = h.online ? "#c8facc" : "#ffc8c8";
+                let age = ((Date.now()/1000) - h.last_seen).toFixed(1);
+                healthHtml += `<tr style="background:${color}">
+                    <td>${dev}</td>
+                    <td>${h.online ? "ONLINE" : "OFFLINE"}</td>
+                    <td>${h.failures}</td>
+                    <td>${age}s ago</td>
+                </tr>`;
+            });
         }
-        healthHtml += "</pre>";
+        healthHtml += "</tbody></table>";
         document.getElementById("healthStatus").innerHTML = healthHtml;
 
-        // Pending logs
-        document.getElementById("pendingLogs").innerHTML = "<pre>"+JSON.stringify(cfg.pending_logs||[],null,2)+"</pre>";
-
-        // Manual peaks
-        let peaksDiv = document.getElementById("manualPeaks");
+        // --- Manual Peaks ---
+        const peaksDiv = document.getElementById("manualPeaks");
         peaksDiv.innerHTML = "";
-        let arms = cfg.NUM_ARMS || 5;
-        for(let i=1;i<=arms;i++){
+        const arms = cfg.NUM_ARMS || 5;
+        for(let i=1; i<=arms; i++){
             let btn = document.createElement("button");
-            btn.innerText = "Trigger Peak ARM"+i;
-            btn.onclick = ()=>triggerPeak(i);
+            btn.innerText = `Trigger Peak ARM${i}`;
+            btn.onclick = () => triggerPeak(i);
             peaksDiv.appendChild(btn);
         }
 
-        // Editable config table
-        let tbody = document.querySelector("#configTable tbody");
+        // --- Editable Config Table ---
+        const tbody = document.querySelector("#configTable tbody");
         tbody.innerHTML = "";
-        for(let k in cfg){
-            if(k==="runtime" || k==="pending_logs") continue;
+        Object.keys(cfg).forEach(k => {
+            if(k === "runtime") return;
             let tr = document.createElement("tr");
             let tdKey = document.createElement("td"); tdKey.innerText = k;
             let tdVal = document.createElement("td");
             let inp = document.createElement("input");
-            inp.value = cfg[k]; inp.id = "cfg_"+k;
+            inp.value = cfg[k] ?? ""; // fallback to empty string
+            inp.id = "cfg_" + k;
             tdVal.appendChild(inp);
             tr.appendChild(tdKey); tr.appendChild(tdVal);
             tbody.appendChild(tr);
-        }
+        });
 
-        // Runtime color fields
-        document.getElementById("show_color_arm").value = cfg.UPDATE_SHOW_COLOR_ARM;
-        document.getElementById("show_color_center").value = cfg.UPDATE_SHOW_COLOR_CENTER;
-        document.getElementById("climax_timeout").value = cfg.CLIMAX_TIMEOUT_SECONDS;
+        // --- Runtime color & climax fields ---
+        document.getElementById("show_color_arm").value = cfg.UPDATE_SHOW_COLOR_ARM ?? "";
+        document.getElementById("show_color_center").value = cfg.UPDATE_SHOW_COLOR_CENTER ?? "";
+        document.getElementById("climax_timeout").value = cfg.CLIMAX_TIMEOUT_SECONDS ?? "";
 
-    } catch(e){ console.error(e); }
+    } catch(e) {
+        console.error("Failed to fetch status:", e);
+        document.getElementById("liveStatus").innerText = "Error loading runtime.";
+        document.getElementById("healthStatus").innerText = "Error loading health.";
+    }
 }
 
+
+// --- Manual peak & show reset ---
 async function triggerPeak(arm){ await fetch("/api/action/trigger_peak",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({arm})}); }
 async function resetShow(){ await fetch("/api/action/reset_show",{method:"POST"}); }
+
+// --- Runtime color ---
 async function applyColor(){
     let arm = document.getElementById("show_color_arm").value;
     let center = document.getElementById("show_color_center").value;
     await fetch("/api/action/set_color",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({arm_value:arm,center_hex:center})});
 }
+
+// --- Config load/save ---
 async function loadConfig(){ await fetchStatus(); }
 async function saveConfig(save=true){
     let payload = {};
-    document.querySelectorAll("#configTable tbody input").forEach(inp=>{let k=inp.id.replace("cfg_","");payload[k]=inp.value;});
+    document.querySelectorAll("#configTable tbody input").forEach(inp=>{
+        let k=inp.id.replace("cfg_","");
+        payload[k]=inp.value;
+    });
     await fetch("/api/config?save="+save,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
     await fetchStatus();
 }
 async function applyConfig(save=false){ await saveConfig(save); }
+
+// --- Climax & Keepalive ---
 async function setClimax(){
     let val = document.getElementById("climax_timeout").value;
     await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({CLIMAX_TIMEOUT_SECONDS:val})});
 }
 async function setKeepalive(val){ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({DEFAULT_KEEPALIVE_INTERVAL:val})}); }
 
-// Audio
+// --- Audio Processor ---
 async function audioStart(){ await fetch("/api/audio/start",{method:"POST"}); updateAudioStatus(); }
 async function audioStop(){ await fetch("/api/audio/stop",{method:"POST"}); updateAudioStatus(); }
 async function audioApplyConfig(){ alert("Audio config apply not yet implemented"); }
@@ -170,7 +191,7 @@ async function updateAudioStatus(){
     document.getElementById("audioStatus").innerText = "Status: "+JSON.stringify(d,null,2);
 }
 
-// Auto-refresh
+// --- Auto-refresh ---
 setInterval(fetchStatus,2000);
 setInterval(updateAudioStatus,2000);
 fetchStatus();
