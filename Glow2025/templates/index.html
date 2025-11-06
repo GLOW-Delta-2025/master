@@ -3,16 +3,102 @@
 <head>
 <meta charset="UTF-8">
 <title>EOT Web UI</title>
+
 <style>
-body { font-family: Arial, sans-serif; margin: 20px; background:#f9f9f9; }
-h2 { margin-top: 30px; }
-section { background: #fff; padding: 15px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);}
-button { margin: 2px; padding: 5px 10px; }
-input, select { padding: 4px; margin: 2px; }
-table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
-#pendingLogs { max-height: 150px; overflow-y: auto; background:#f4f4f4; padding:5px; border-radius:5px; margin-top:5px; font-family:monospace; font-size:12px; }
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+  background: #121212;
+  color: #faf5f5;
+}
+
+h2 {
+  margin-top: 30px;
+  color: #ffffff;
+}
+
+section {
+  background: #1c1c1c;
+  padding: 15px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+}
+
+button {
+  margin: 2px;
+  padding: 5px 10px;
+  background: #2a2a2a;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #3a3a3a;
+}
+
+input, select {
+  padding: 4px;
+  margin: 2px;
+  background: #222;
+  color: #f0f0f0;
+  border: 1px solid #555;
+  border-radius: 4px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th, td {
+  border: 1px solid #333;
+  padding: 6px;
+  text-align: left;
+}
+
+th {
+  background: #222;
+  color: #ccc;
+}
+
+tr:nth-child(even) {
+  background: #1a1a1a;
+}
+
+tr:nth-child(odd) {
+  background: #151515;
+}
+
+/* Darker, muted green and red tones */
+tr.green {
+  background-color: #0d3b23 !important;
+  color: #9ddca4 !important;
+}
+
+tr.red {
+  background-color: #3b0d0d !important;
+  color: #e49d9d !important;
+}
+
+
+#pendingLogs {
+  max-height: 150px;
+  overflow-y: auto;
+  background: #181818;
+  padding: 5px;
+  border-radius: 5px;
+  margin-top: 5px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #b0b0b0;
+  border: 1px solid #333;
+}
 </style>
+
+
 </head>
 <body>
 
@@ -67,20 +153,6 @@ th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
 </form>
 </section>
 
-<section>
-<h2>Audio Processor</h2>
-<label>Device ID:</label><input type="text" id="audio_device"><br>
-<label>Channels (e.g., 1,2):</label><input type="text" id="audio_channels"><br>
-<label>Names (comma-separated):</label><input type="text" id="audio_names"><br>
-<label>Threshold dB:</label><input type="number" id="audio_threshold"><br>
-<label>Alpha Rise:</label><input type="number" id="audio_alpha_rise"><br>
-<label>Alpha Decay:</label><input type="number" id="audio_alpha_decay"><br>
-<button onclick="audioStart()">Start</button>
-<button onclick="audioStop()">Stop</button>
-<button onclick="audioApplyConfig()">Apply Config</button>
-<div id="audioStatus">Status: loading…</div>
-</section>
-
 <script>
 // --- Live Status & Health ---
 async function fetchStatus() {
@@ -99,19 +171,29 @@ async function fetchStatus() {
         document.getElementById("liveStatus").innerText = runtimeText;
 
         // --- Health Table ---
-        let healthHtml = "<table><thead><tr><th>Device</th><th>Status</th><th>Failures</th><th>Last Seen</th></tr></thead><tbody>";
-        if(cfg.runtime && cfg.runtime.health){
-            Object.entries(cfg.runtime.health).forEach(([dev, h]) => {
-                let color = h.online ? "#c8facc" : "#ffc8c8";
-                let age = ((Date.now()/1000) - h.last_seen).toFixed(1);
-                healthHtml += `<tr style="background:${color}">
-                    <td>${dev}</td>
-                    <td>${h.online ? "ONLINE" : "OFFLINE"}</td>
-                    <td>${h.failures}</td>
-                    <td>${age}s ago</td>
-                </tr>`;
-            });
+        let healthHtml = `
+        <table>
+            <thead>
+            <tr><th>Device</th><th>Status</th><th>Failures</th><th>Last Seen</th></tr>
+            </thead>
+            <tbody>
+        `;
+
+        if (cfg.runtime && cfg.runtime.health) {
+        Object.entries(cfg.runtime.health).forEach(([dev, h]) => {
+            let rowClass = h.online ? "green" : "red";
+            let age = ((Date.now() / 1000) - h.last_seen).toFixed(1);
+            healthHtml += `
+            <tr class="${rowClass}">
+                <td>${dev}</td>
+                <td>${h.online ? "ONLINE" : "OFFLINE"}</td>
+                <td>${h.failures}</td>
+                <td>${age}s ago</td>
+            </tr>
+            `;
+        });
         }
+
         healthHtml += "</tbody></table>";
         document.getElementById("healthStatus").innerHTML = healthHtml;
 
@@ -186,15 +268,6 @@ async function setClimax(){
     await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({CLIMAX_TIMEOUT_SECONDS:val})});
 }
 async function setKeepalive(val){ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({DEFAULT_KEEPALIVE_INTERVAL:val})}); }
-
-// --- Audio Processor ---
-async function audioStart(){ await fetch("/api/audio/start",{method:"POST"}); updateAudioStatus(); }
-async function audioStop(){ await fetch("/api/audio/stop",{method:"POST"}); updateAudioStatus(); }
-async function audioApplyConfig(){ alert("Audio config apply not yet implemented"); }
-async function updateAudioStatus(){
-    let resp = await fetch("/api/audio/status"); let d = await resp.json();
-    document.getElementById("audioStatus").innerText = "Status: "+JSON.stringify(d,null,2);
-}
 
 // --- Auto-refresh ---
 setInterval(fetchStatus,2000);

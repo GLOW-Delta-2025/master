@@ -18,6 +18,7 @@ from typing import Dict, Any
 
 from flask import Flask, jsonify, request, render_template
 
+
 try:
     import EOTMain as controller_module
     MacMiniController = controller_module.MacMiniController
@@ -69,6 +70,10 @@ EDITABLE_KEYS = {
 CONFIG_FILE = "controller_config.json"
 
 app = Flask(__name__)
+
+from BlueprintAudio import audio_bp
+app.register_blueprint(audio_bp, url_prefix="/audio")
+
 
 # --- Controller config helpers ---
 def get_current_config() -> Dict[str, Any]:
@@ -258,32 +263,11 @@ def api_set_color():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/audio/status", methods=["GET"])
-def api_audio_status():
-    return jsonify(get_audio_status())
-
-@app.route("/api/audio/start", methods=["POST"])
-def api_audio_start():
-    try:
-        if controller.audio_lib:
-            controller.audio_lib.start()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/audio/stop", methods=["POST"])
-def api_audio_stop():
-    try:
-        if controller.audio_lib:
-            controller.audio_lib.stop()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/")
 def index():
     return render_template('index.html')
 
 if __name__ == "__main__":
-    print("Starting EOT Web UI on http://127.0.0.1:5000/")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    print("Starting EOT Web UI on http://0.0.0.0:5000/")
+    app.run(host="0.0.0.0", port=5000, debug=False)

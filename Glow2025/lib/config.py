@@ -20,7 +20,7 @@ import os
 from typing import Any, Dict, Optional
 
 DEFAULTS: Dict[str, Any] = {
-    "device": 2,
+    "device": 1,
     "channels": [6, 7],
     "samplerate": 48000,
     "spike_threshold_db": 6.0,

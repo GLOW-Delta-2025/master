@@ -1,0 +1,12 @@
+{
+  "poll_interval": 0.4,
+  "alpha_rise": 0.58,
+  "device": 1,
+  "channels": [
+    6,
+    7
+  ],
+  "names": [
+    ""
+  ]
+}

@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spike Detector</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px;  background: #121212;
+    color: #faf5f5;}
+    label { display: inline-block; width: 140px; }
+    input, select { margin-bottom: 8px; }
+    #log { width: 100%; height: 160px; }
+    .meter { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h2>Spike Detector (Web UI)</h2>
+
+  <div>
+    <label>Device index:</label>
+    <input id="device" value="1" size="4" title="Numeric index of the audio device as shown by your sounddevice listing (e.g. 1 = X-USB)">
+    <div class="help">Which audio device to read from. Use the numeric index from sounddevice's device list. Example: 1 for 'X-USB'. If unsure, try 0..5 until you find the correct device.</div>
+  </div>
+  <div>
+    <label>Channels (0-based, comma):</label>
+    <input id="channels" value="6,7" size="8" title="Comma-separated zero-based channel indexes (e.g. '6,7' to monitor physical channels 7 and 8)">
+    <div class="help">Which channel numbers to monitor from the selected device. Channels are zero-based (so channel 6 = physical channel 7). You can enter multiple channels separated by commas.</div>
+  </div>
+  <div>
+    <label>Channel names (comma):</label>
+    <input id="names" value="Left,Right" size="20" title="Optional comma-separated human names for each monitored channel (e.g. 'Front,Rear,Center')">
+    <div class="help">Optional labels to attach to each monitored channel. The first name maps to the first channel in the "Channels" box, etc.</div>
+  </div>
+  <div>
+    <label>Threshold (dB):</label>
+    <input id="threshold" type="range" min="0" max="20" step="0.5" value="4" title="Minimum dB above the adaptive noise floor that triggers a spike">
+    <span id="threshold_val">4.0</span>
+    <div class="help">How many decibels above the estimated noise floor a signal must be to count as a spike. Lower = more sensitive. Typical values: 3–8 dB. Start at 4 dB.</div>
+  </div>
+  <div>
+    <label>Alpha rise:</label>
+    <input id="alpha_rise" type="range" min="0.5" max="0.999" step="0.01" value="0.85" title="Noise-floor smoothing when signal rises (higher = slower to raise)">
+    <span id="alpha_rise_val">0.85</span>
+    <label style="margin-left:12px">Alpha decay:</label>
+    <input id="alpha_decay" type="range" min="0.1" max="0.99" step="0.01" value="0.4" title="Noise-floor smoothing when signal decays (lower = faster to fall)">
+    <span id="alpha_decay_val">0.40</span>
+    <div class="help">Two smoothing factors for the adaptive noise floor. "Alpha rise" controls how quickly the baseline increases when levels go up (larger values = slower). "Alpha decay" controls how quickly the baseline drops when levels fall (smaller values = faster response). Use faster decay for more dynamic environments; use slower rise to avoid reacting to short bursts.</div>
+  </div>
+  <div>
+    <label>Print interval (s):</label>
+    <input id="interval" type="range" min="0.1" max="2.0" step="0.1" value="0.5" title="How often (seconds) the UI polls and averages levels">
+    <span id="interval_val">0.5</span>
+    <div class="help">How often the UI requests the current averaged levels and spike state (in seconds). Shorter intervals give faster feedback but increase CPU and UI updates. 0.2–0.5s is a common tradeoff.</div>
+  </div>
+  <div>
+    <button id="start">Start</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="save">Save</button>
+    <button id="load">Load</button>
+  </div>
+
+  <h4>Quick tips</h4>
+  <ul>
+    <li><strong>Find device index:</strong> If you're not sure which device number to use, run a small Python snippet that prints sounddevice.query_devices() or try incrementing device index until you get audio.</li>
+    <li><strong>Channel numbering:</strong> Channels are zero-based. To monitor physical channels 7 & 8 enter "6,7".</li>
+    <li><strong>Sensitivity tuning:</strong> If you see too many false positives, raise the Threshold. If spikes are missed, lower the Threshold or make Alpha decay smaller (faster).</li>
+  </ul>
+
+  <h3>Status</h3>
+  <div id="status">Not running</div>
+  <h4>Channels</h4>
+  <pre id="channels_out" class="meter">--</pre>
+
+  <h4>Log</h4>
+  <textarea id="log" readonly></textarea>
+
+ <script>
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+const channelsOut = document.getElementById('channels_out');
+const log = document.getElementById('log');
+
+let polling = null;
+
+function appendLog(s){ log.value = new Date().toLocaleTimeString() + ' - ' + s + '\n' + log.value; }
+
+async function sendConfig(payload){
+  try { 
+    await fetch('/audio/config', {
+      method:'POST', 
+      headers:{'Content-Type':'application/json'}, 
+      body: JSON.stringify(payload)
+    });
+  } catch(e){ appendLog('Config error: '+e); }
+}
+
+startBtn.onclick = async () => {
+  const payload = {
+    device: parseInt(document.getElementById('device').value || '1'),
+    channels: (document.getElementById('channels').value || '6,7').split(',').map(s=>parseInt(s.trim())),
+    names: (document.getElementById('names').value || '').split(',').map(s=>s.trim()),
+    threshold: parseFloat(document.getElementById('threshold').value || '4'),
+    alpha_rise: parseFloat(document.getElementById('alpha_rise').value || '0.85'),
+    alpha_decay: parseFloat(document.getElementById('alpha_decay').value || '0.4')
+  };
+  try{
+    const r = await fetch('/audio/start', {
+      method:'POST', 
+      headers:{'Content-Type':'application/json'}, 
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if(!j.ok){ appendLog('Start failed: '+(j.error||'unknown')); return; }
+    appendLog('Started');
+    startBtn.disabled = true; stopBtn.disabled = false;
+    statusEl.textContent = 'Running';
+    polling = setInterval(fetchStatus, parseFloat(document.getElementById('interval').value)*1000);
+  } catch(e){ appendLog('Start exception: '+e); }
+};
+
+stopBtn.onclick = async () => {
+  try { 
+    await fetch('/audio/stop', {method:'POST'}); 
+    appendLog('Stopped'); 
+  } catch(e){ appendLog('Stop exception: '+e); }
+  startBtn.disabled = false; stopBtn.disabled = true;
+  statusEl.textContent = 'Stopped';
+  if(polling){ clearInterval(polling); polling = null; }
+};
+
+async function fetchStatus(){
+  try{
+    const r = await fetch('/audio/status');
+    const j = await r.json();
+    const lines = [];
+    if(j.avg_db){
+      const names = j.channel_names || {};
+      for(const ch in j.avg_db){
+        const name = names[ch] || `ch${parseInt(ch)+1}`;
+        const a = j.avg_db[ch].toFixed(1);
+        const nf = j.noise_db[ch] ? j.noise_db[ch].toFixed(1) : '---';
+        let spike = '';
+        if(j.spikes && j.spikes[ch]){
+          spike = ` SPIKE ${j.spikes[ch].db.toFixed(1)} dB (+${j.spikes[ch].delta.toFixed(1)})`; 
+          appendLog(`SPIKE ${name}: ${j.spikes[ch].db.toFixed(1)} dB`);
+        }
+        lines.push(`${name}: avg ${a} dBFS | floor ${nf} dBFS${spike}`);
+      }
+    }
+    channelsOut.textContent = lines.join('\n');
+  } catch(e){ console.log(e); }
+}
+
+// wire slider change events to update config
+function wireSlider(id, key, transform=(v)=>v){
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(id+'_val');
+  el.addEventListener('input', ()=>{
+    const v = transform(el.value);
+    valEl.textContent = typeof v === 'number' ? v.toFixed(2) : v;
+  });
+  el.addEventListener('change', ()=>{
+    const payload = {};
+    payload[key] = transform(el.value);
+    sendConfig(payload);
+  });
+}
+
+wireSlider('threshold', 'threshold', v=>parseFloat(v));
+wireSlider('alpha_rise', 'alpha_rise', v=>parseFloat(v));
+wireSlider('alpha_decay', 'alpha_decay', v=>parseFloat(v));
+wireSlider('interval', 'interval', v=>parseFloat(v));
+
+// save button: send channel/device/names/interval to /config
+document.getElementById('save').addEventListener('click', ()=>{
+  const payload = {
+    device: parseInt(document.getElementById('device').value || '1'),
+    channels: (document.getElementById('channels').value || '6,7').split(',').map(s=>parseInt(s.trim())),
+    names: (document.getElementById('names').value || '').split(',').map(s=>s.trim()),
+    print_interval: parseFloat(document.getElementById('interval').value || '0.5'),
+  };
+  sendConfig(payload);
+  appendLog('Saved config');
+});
+
+// load button: fetch current config and populate the form
+async function loadConfig(){
+  try{
+    const r = await fetch('/audio/config');
+    const j = await r.json();
+    if(!j.ok) return;
+    const cfg = j.config || {};
+    if('device' in cfg) document.getElementById('device').value = cfg.device;
+    if('channels' in cfg) document.getElementById('channels').value = (cfg.channels||[]).join(',');
+    if('names' in cfg) document.getElementById('names').value = (cfg.names||[]).join(',');
+    if('spike_threshold_db' in cfg) document.getElementById('threshold').value = cfg.spike_threshold_db;
+    if('alpha_rise' in cfg) document.getElementById('alpha_rise').value = cfg.alpha_rise;
+    if('alpha_decay' in cfg) document.getElementById('alpha_decay').value = cfg.alpha_decay;
+    if('poll_interval' in cfg) document.getElementById('interval').value = cfg.poll_interval;
+    // update slider displays
+    document.getElementById('threshold_val').textContent = parseFloat(document.getElementById('threshold').value).toFixed(2);
+    document.getElementById('alpha_rise_val').textContent = parseFloat(document.getElementById('alpha_rise').value).toFixed(2);
+    document.getElementById('alpha_decay_val').textContent = parseFloat(document.getElementById('alpha_decay').value).toFixed(2);
+    document.getElementById('interval_val').textContent = parseFloat(document.getElementById('interval').value).toFixed(2);
+  }catch(e){ appendLog('Load error: '+e); }
+}
+
+document.getElementById('load').addEventListener('click', loadConfig);
+// auto-load once on startup
+loadConfig().catch(()=>{});
+</script>
+
+</body>
+</html>
