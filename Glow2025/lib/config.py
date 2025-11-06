@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 DEFAULTS: Dict[str, Any] = {
     "device": 1,
-    "channels": [6, 7],
+    "channels": [2,3,4,5,6],
     "samplerate": 48000,
     "spike_threshold_db": 6.0,
     "noise_init_db": -50.0,
@@ -32,7 +32,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_delay_ms": 10.0,
     "poll_interval": 0.5,
     # simple mapping of channel names (list ordered to channels)
-    "names": [],
+    "names": ["ARM1","ARM2","ARM3","ARM5","ARM4"],
 }
 
 
