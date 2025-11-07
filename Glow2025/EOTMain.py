@@ -46,11 +46,11 @@ except Exception:
     AudioProcessorLib = None
  
 # ---------------- CONFIG ----------------
-SERIAL_PORT = "/dev/tty.usbmodem14301" #"/dev/tty.usbmodem83171401"
+SERIAL_PORT = "/dev/tty.usbmodem83171401" #"/dev/tty.usbmodem14301" 
 SERIAL_BAUD = 115200
  
 NUM_ARMS = 5
-MAX_STARS_FOR_CLIMAX = 50
+MAX_STARS_FOR_CLIMAX = 25
  
 PEAK_TIMEOUT = 10.0         # seconds without peaks before auto-send
 STAR_SEND_TIME = 20.0       # seconds from MAKE_STAR confirm before auto-send

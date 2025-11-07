@@ -20,28 +20,32 @@ CONFIG_FILE = "controller_config.json"
 # ---------------------------------------------------------------------
 # Editable keys
 # ---------------------------------------------------------------------
+def log_and_set(attr, value):
+    setattr(controller, attr, value)
+    print(f"[CONFIG] {attr} set to {value}")
+
 EDITABLE_KEYS = {
-    "SERIAL_PORT": ("SERIAL_PORT", None),
-    "SERIAL_BAUD": ("SERIAL_BAUD", None),
-    "NUM_ARMS": ("NUM_ARMS", None),
-    "MAX_STARS_FOR_CLIMAX": ("MAX_STARS_FOR_CLIMAX", lambda v: setattr(controller, "stars_collected", min(controller.stars_collected, int(v)))),
-    "PEAK_TIMEOUT": ("PEAK_TIMEOUT", None),
-    "STAR_SEND_TIME": ("STAR_SEND_TIME", None),
-    "MAX_BRIGHTNESS": ("MAX_BRIGHTNESS", None),
-    "UPDATE_STEP": ("UPDATE_STEP", None),
-    "ACK_TIMEOUT": ("ACK_TIMEOUT", None),
-    "MAX_SEND_RETRIES": ("MAX_SEND_RETRIES", None),
-    "ARRIVAL_WARN_AFTER": ("ARRIVAL_WARN_AFTER", None),
-    "ARRIVAL_TIMEOUT": ("ARRIVAL_TIMEOUT", None),
-    "WARN_THROTTLE": ("WARN_THROTTLE", None),
+    "SERIAL_PORT": ("SERIAL_PORT", lambda v: print("[CONFIG] SERIAL_PORT changed – will apply on restart")),
+    "SERIAL_BAUD": ("SERIAL_BAUD", lambda v: print("[CONFIG] SERIAL_BAUD changed – will apply on restart")),
+    "NUM_ARMS": ("NUM_ARMS", lambda v: print("[CONFIG] NUM_ARMS changed – will apply on restart")),
+    "MAX_STARS_FOR_CLIMAX": ("MAX_STARS_FOR_CLIMAX", lambda v: log_and_set("MAX_STARS_FOR_CLIMAX", int(v))),
+    "PEAK_TIMEOUT": ("PEAK_TIMEOUT", lambda v: log_and_set("PEAK_TIMEOUT", float(v))),
+    "STAR_SEND_TIME": ("STAR_SEND_TIME", lambda v: log_and_set("STAR_SEND_TIME", float(v))),
+    "MAX_BRIGHTNESS": ("MAX_BRIGHTNESS", lambda v: log_and_set("MAX_BRIGHTNESS", int(v))),
+    "UPDATE_STEP": ("UPDATE_STEP", lambda v: log_and_set("UPDATE_STEP", int(v))),
+    "ACK_TIMEOUT": ("ACK_TIMEOUT", lambda v: log_and_set("ACK_TIMEOUT", float(v))),
+    "MAX_SEND_RETRIES": ("MAX_SEND_RETRIES", lambda v: log_and_set("MAX_SEND_RETRIES", int(v))),
+    "ARRIVAL_WARN_AFTER": ("ARRIVAL_WARN_AFTER", lambda v: log_and_set("ARRIVAL_WARN_AFTER", float(v))),
+    "ARRIVAL_TIMEOUT": ("ARRIVAL_TIMEOUT", lambda v: log_and_set("ARRIVAL_TIMEOUT", float(v))),
+    "WARN_THROTTLE": ("WARN_THROTTLE", lambda v: log_and_set("WARN_THROTTLE", float(v))),
     "DEFAULT_KEEPALIVE_INTERVAL": ("DEFAULT_KEEPALIVE_INTERVAL", lambda v: controller.set_keepalive_interval(float(v))),
-    "HEALTH_FAIL_THRESHOLD": ("HEALTH_FAIL_THRESHOLD", None),
-    "ARM_SPEED_MIN": ("ARM_SPEED_MIN", None),
-    "ARM_SPEED_MAX": ("ARM_SPEED_MAX", None),
-    "CENTER_SPEED_MIN": ("CENTER_SPEED_MIN", None),
-    "CENTER_SPEED_MAX": ("CENTER_SPEED_MAX", None),
+    "HEALTH_FAIL_THRESHOLD": ("HEALTH_FAIL_THRESHOLD", lambda v: log_and_set("HEALTH_FAIL_THRESHOLD", int(v))),
+    "ARM_SPEED_MIN": ("ARM_SPEED_MIN", lambda v: log_and_set("ARM_SPEED_MIN", int(v))),
+    "ARM_SPEED_MAX": ("ARM_SPEED_MAX", lambda v: log_and_set("ARM_SPEED_MAX", int(v))),
+    "CENTER_SPEED_MIN": ("CENTER_SPEED_MIN", lambda v: log_and_set("CENTER_SPEED_MIN", int(v))),
+    "CENTER_SPEED_MAX": ("CENTER_SPEED_MAX", lambda v: log_and_set("CENTER_SPEED_MAX", int(v))),
     "CLIMAX_TIMEOUT_SECONDS": ("CLIMAX_TIMEOUT_SECONDS", lambda v: controller.set_climax_timeout(float(v))),
-    "DEBUG_FRAMES": ("DEBUG_FRAMES", None),
+    "DEBUG_FRAMES": ("DEBUG_FRAMES", lambda v: log_and_set("DEBUG_FRAMES", bool(v))),
     "UPDATE_SHOW_COLOR_ARM": ("show_color_arm", lambda v: controller.set_show_color(arm_value=int(v))),
     "UPDATE_SHOW_COLOR_CENTER": ("show_color_center", lambda v: controller.set_show_color(center_hex=str(v))),
 }
@@ -49,26 +53,14 @@ EDITABLE_KEYS = {
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
-def load_saved_config() -> Dict[str, Any]:
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
 def get_current_config() -> Dict[str, Any]:
     cfg: Dict[str, Any] = {}
-    saved_cfg = load_saved_config()
+    mod = controller
 
     for k, (mod_name, _) in EDITABLE_KEYS.items():
-        # 1. Try controller attribute
-        val = getattr(controller, mod_name, None)
-        # 2. Fall back to saved config
-        if val is None and k in saved_cfg:
-            val = saved_cfg[k]
-        # 3. Safe default
+        val = getattr(mod, mod_name, None) or getattr(controller, mod_name, None)
+
+        # safe defaults for web rendering
         if val is None:
             if "COLOR" in k:
                 val = "#000000" if "CENTER" in k else 0
@@ -76,6 +68,7 @@ def get_current_config() -> Dict[str, Any]:
                 val = 0
             else:
                 val = ""
+
         cfg[k] = val
 
     # runtime info
@@ -91,6 +84,7 @@ def get_current_config() -> Dict[str, Any]:
     stars_collected = getattr(controller, "stars_collected", 0)
     cs = getattr(controller, "climax_state", None)
     climax_state = cs.name if hasattr(cs, "name") else cs
+
     pending = getattr(controller, "pending_confirms", 0)
     pending_confirms = len(pending) if isinstance(pending, (list, dict, set)) else int(pending)
 
@@ -99,11 +93,12 @@ def get_current_config() -> Dict[str, Any]:
         "climax_state": climax_state,
         "keepalive_interval": getattr(controller, "keepalive_interval", None),
         "pending_confirms": pending_confirms,
-        "version": getattr(controller, "VERSION", None),
+        "version": getattr(mod, "VERSION", None),
         "health": runtime_health
     }
 
     return cfg
+
 
 def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
     result = {"applied": {}, "errors": {}}
@@ -112,35 +107,15 @@ def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
             result["errors"][k] = "Not editable via web UI."
             continue
 
-        mod_name, apply_fn = EDITABLE_KEYS[k]
-        parsed = v
+        _, apply_fn = EDITABLE_KEYS[k]
         try:
-            if isinstance(v, str):
-                if v.lower() in ("true", "false"):
-                    parsed = v.lower() == "true"
-                else:
-                    try:
-                        parsed = float(v) if "." in v else int(v)
-                    except Exception:
-                        parsed = v
-
-            setattr(controller, mod_name, parsed)
             if apply_fn:
-                try:
-                    apply_fn(parsed)
-                except Exception as e:
-                    result["errors"][k] = f"apply_fn error: {e}"
-
-            result["applied"][k] = parsed
+                apply_fn(v)
+            result["applied"][k] = v
         except Exception as e:
             result["errors"][k] = str(e)
 
     return result
-
-# Apply saved config at startup
-saved_cfg = load_saved_config()
-if saved_cfg:
-    apply_config_changes(saved_cfg)
 
 # ---------------------------------------------------------------------
 # Routes
