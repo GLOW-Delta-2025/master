@@ -46,7 +46,7 @@ except Exception:
     AudioProcessorLib = None
  
 # ---------------- CONFIG ----------------
-SERIAL_PORT = "/dev/tty.usbmodem83171401" #"/dev/tty.usbmodem83171401"
+SERIAL_PORT = "/dev/tty.usbmodem14301" #"/dev/tty.usbmodem83171401"
 SERIAL_BAUD = 115200
  
 NUM_ARMS = 5

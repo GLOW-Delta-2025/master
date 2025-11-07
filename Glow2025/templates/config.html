@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>EOT Web UI — Config</title>
+<style>
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+  background: #121212;
+  color: #faf5f5;
+}
+h2 { margin-top: 30px; color: #ffffff; }
+section {
+  background: #1c1c1c;
+  padding: 15px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+}
+button {
+  margin: 2px; padding: 5px 10px;
+  background: #2a2a2a; color: #e0e0e0;
+  border: 1px solid #444; border-radius: 4px; cursor: pointer;
+}
+button:hover { background: #3a3a3a; }
+input {
+  padding: 4px; margin: 2px;
+  background: #222; color: #f0f0f0;
+  border: 1px solid #555; border-radius: 4px;
+}
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #333; padding: 6px; text-align: left; }
+th { background: #222; color: #ccc; }
+tr:nth-child(even) { background: #1a1a1a; }
+tr:nth-child(odd) { background: #151515; }
+nav a { color: #8cbfff; margin-right: 15px; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<h1>EOT Web UI</h1>
+<nav>
+  <a href="/">Live Status</a>
+  <a href="/config/ui">Config</a>
+</nav>
+
+<section>
+<h2>Runtime Controls</h2>
+<label>show_color_arm (0–255):</label>
+<input type="number" id="show_color_arm" min="0" max="255">
+<label>show_color_center (#RRGGBB):</label>
+<input type="text" id="show_color_center" maxlength="7">
+<button onclick="applyColor()">Apply Color</button>
+</section>
+
+<section>
+<h2>Load / Save Config</h2>
+<button onclick="loadConfig()">Load saved config</button>
+<button onclick="saveConfig(true)">Save editable config</button>
+</section>
+
+<section>
+<h2>Climax & Keepalive</h2>
+<label>Climax timeout (s):</label>
+<input type="number" id="climax_timeout">
+<button onclick="setClimax()">Set</button>
+<button onclick="setKeepalive(30)">Keepalive 30s</button>
+<button onclick="setKeepalive(60)">Keepalive 60s</button>
+</section>
+
+<section>
+<h2>Editable Config</h2>
+<form id="editableConfigForm">
+<table id="configTable">
+<thead><tr><th>Key</th><th>Value</th></tr></thead>
+<tbody></tbody>
+</table>
+<button type="button" onclick="applyConfig(false)">Apply changes</button>
+<button type="button" onclick="applyConfig(true)">Apply + Save</button>
+</form>
+</section>
+
+<script>
+async function fetchConfig() {
+  const res = await fetch("/config/api/config");
+  const cfg = await res.json();
+
+  // Fill editable config table
+  const tbody = document.querySelector("#configTable tbody");
+  tbody.innerHTML = "";
+  Object.keys(cfg).forEach(k => {
+    if (k === "runtime") return;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${k}</td>
+      <td><input id="cfg_${k}" value="${cfg[k] ?? ""}"></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("show_color_arm").value = cfg.UPDATE_SHOW_COLOR_ARM ?? "";
+  document.getElementById("show_color_center").value = cfg.UPDATE_SHOW_COLOR_CENTER ?? "";
+  document.getElementById("climax_timeout").value = cfg.CLIMAX_TIMEOUT_SECONDS ?? "";
+}
+
+async function applyColor() {
+  const arm = document.getElementById("show_color_arm").value;
+  const center = document.getElementById("show_color_center").value;
+  await fetch("/config/api/action/set_color", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({arm_value: arm, center_hex: center})
+  });
+}
+
+async function saveConfig(save = true) {
+  const payload = {};
+  document.querySelectorAll("#configTable input").forEach(inp => {
+    payload[inp.id.replace("cfg_", "")] = inp.value;
+  });
+  await fetch(`/config/api/config?save=${save}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+}
+
+async function applyConfig(save = false) { await saveConfig(save); }
+async function loadConfig() { await fetchConfig(); }
+async function setClimax() {
+  const val = document.getElementById("climax_timeout").value;
+  await fetch("/config/api/config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({CLIMAX_TIMEOUT_SECONDS: val})
+  });
+}
+async function setKeepalive(val) {
+  await fetch("/config/api/config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({DEFAULT_KEEPALIVE_INTERVAL: val})
+  });
+}
+s
+fetchConfig();
+</script>
+</body>
+</html>
