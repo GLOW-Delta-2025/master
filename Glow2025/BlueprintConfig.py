@@ -1,4 +1,3 @@
-# BlueprintConfig.py
 """
 Blueprint for configuration management and color control.
 Handles:
@@ -12,15 +11,14 @@ from flask import Blueprint, jsonify, request, render_template
 import json, os
 from typing import Dict, Any
 
-from EOTcontroller import controller  # import the same shared controller
-import EOTMain as controller_module
+from EOTcontroller import controller  # shared controller
 
 config_bp = Blueprint("config_bp", __name__, template_folder="templates")
 
 CONFIG_FILE = "controller_config.json"
 
 # ---------------------------------------------------------------------
-# Editable keys (moved here from EOTWeb)
+# Editable keys
 # ---------------------------------------------------------------------
 EDITABLE_KEYS = {
     "SERIAL_PORT": ("SERIAL_PORT", None),
@@ -51,20 +49,37 @@ EDITABLE_KEYS = {
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+def load_saved_config() -> Dict[str, Any]:
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 def get_current_config() -> Dict[str, Any]:
     cfg: Dict[str, Any] = {}
-    mod = controller
+    saved_cfg = load_saved_config()
 
     for k, (mod_name, _) in EDITABLE_KEYS.items():
-        if hasattr(mod, mod_name):
-            cfg[k] = getattr(mod, mod_name)
-        elif hasattr(controller, mod_name):
-            cfg[k] = getattr(controller, mod_name)
-        else:
-            cfg[k] = None
+        # 1. Try controller attribute
+        val = getattr(controller, mod_name, None)
+        # 2. Fall back to saved config
+        if val is None and k in saved_cfg:
+            val = saved_cfg[k]
+        # 3. Safe default
+        if val is None:
+            if "COLOR" in k:
+                val = "#000000" if "CENTER" in k else 0
+            elif isinstance(val, int) or k in ("NUM_ARMS", "MAX_BRIGHTNESS", "UPDATE_STEP"):
+                val = 0
+            else:
+                val = ""
+        cfg[k] = val
 
-    # Runtime health info
-    runtime_health: Dict[str, Dict[str, Any]] = {}
+    # runtime info
+    runtime_health = {}
     if hasattr(controller, "health"):
         for dev, info in controller.health.items():
             runtime_health[dev.value] = {
@@ -75,41 +90,30 @@ def get_current_config() -> Dict[str, Any]:
 
     stars_collected = getattr(controller, "stars_collected", 0)
     cs = getattr(controller, "climax_state", None)
-    if cs is None:
-        climax_state = None
-    elif hasattr(cs, "name"):
-        climax_state = cs.name
-    else:
-        climax_state = cs
-
+    climax_state = cs.name if hasattr(cs, "name") else cs
     pending = getattr(controller, "pending_confirms", 0)
-    if isinstance(pending, (list, dict, set)):
-        pending_confirms = len(pending)
-    else:
-        pending_confirms = int(pending)
-
-    version = getattr(mod, "VERSION", None)
+    pending_confirms = len(pending) if isinstance(pending, (list, dict, set)) else int(pending)
 
     cfg["runtime"] = {
         "stars_collected": stars_collected,
         "climax_state": climax_state,
         "keepalive_interval": getattr(controller, "keepalive_interval", None),
         "pending_confirms": pending_confirms,
-        "version": version,
+        "version": getattr(controller, "VERSION", None),
         "health": runtime_health
     }
 
     return cfg
 
-
 def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
-    mod = controller
     result = {"applied": {}, "errors": {}}
     for k, v in changes.items():
         if k not in EDITABLE_KEYS:
             result["errors"][k] = "Not editable via web UI."
             continue
+
         mod_name, apply_fn = EDITABLE_KEYS[k]
+        parsed = v
         try:
             if isinstance(v, str):
                 if v.lower() in ("true", "false"):
@@ -119,30 +123,30 @@ def apply_config_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
                         parsed = float(v) if "." in v else int(v)
                     except Exception:
                         parsed = v
-            else:
-                parsed = v
-            if hasattr(mod, mod_name):
-                setattr(mod, mod_name, parsed)
-            elif hasattr(controller, mod_name):
-                setattr(controller, mod_name, parsed)
-            else:
-                setattr(mod, mod_name, parsed)
+
+            setattr(controller, mod_name, parsed)
             if apply_fn:
                 try:
                     apply_fn(parsed)
                 except Exception as e:
                     result["errors"][k] = f"apply_fn error: {e}"
+
             result["applied"][k] = parsed
         except Exception as e:
             result["errors"][k] = str(e)
+
     return result
+
+# Apply saved config at startup
+saved_cfg = load_saved_config()
+if saved_cfg:
+    apply_config_changes(saved_cfg)
 
 # ---------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------
 @config_bp.route("/")
 def config_ui():
-    """Render the configuration page."""
     return render_template("config.html")
 
 
@@ -158,6 +162,7 @@ def api_post_config():
         return jsonify({"error": "expected JSON object"}), 400
 
     res = apply_config_changes(payload)
+
     if request.args.get("save") in ("1", "true", "True"):
         try:
             with open(CONFIG_FILE, "w") as f:
@@ -165,19 +170,8 @@ def api_post_config():
             res["saved_to_disk"] = CONFIG_FILE
         except Exception as e:
             res.setdefault("errors", {})["save"] = str(e)
+
     return jsonify(res)
-
-
-@config_bp.route("/api/config/save", methods=["GET"])
-def api_save_config():
-    cfg = get_current_config()
-    save_obj = {k: cfg.get(k) for k in EDITABLE_KEYS.keys()}
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(save_obj, f, indent=2)
-        return jsonify({"saved": CONFIG_FILE})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @config_bp.route("/api/config/load", methods=["GET"])
@@ -195,7 +189,6 @@ def api_load_config():
 
 @config_bp.route("/api/action/set_color", methods=["POST"])
 def api_set_color():
-    """Change LED colors for arms and center."""
     body = request.get_json(force=True)
     arm_v = body.get("arm_value")
     center_hex = body.get("center_hex")
