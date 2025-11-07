@@ -39,10 +39,11 @@ nav a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-<h1>EOT Web UI</h1>
+<h1>EOT Config</h1>
+<nav>
 <nav>
   <a href="/">Live Status</a>
-  <a href="/config/ui">Config</a>
+  <a href="/audio/">Audio config</a>
 </nav>
 
 <section>
@@ -55,18 +56,18 @@ nav a:hover { text-decoration: underline; }
 </section>
 
 <section>
-<h2>Load / Save Config</h2>
-<button onclick="loadConfig()">Load saved config</button>
-<button onclick="saveConfig(true)">Save editable config</button>
-</section>
-
-<section>
 <h2>Climax & Keepalive</h2>
 <label>Climax timeout (s):</label>
 <input type="number" id="climax_timeout">
 <button onclick="setClimax()">Set</button>
 <button onclick="setKeepalive(30)">Keepalive 30s</button>
 <button onclick="setKeepalive(60)">Keepalive 60s</button>
+</section>
+
+<section>
+<h2>Load / Save Config</h2>
+<button onclick="loadConfig()">Load saved config</button>
+<button onclick="saveConfig(true)">Save editable config</button>
 </section>
 
 <section>
