@@ -1,6 +1,6 @@
 {
   "poll_interval": 0.3,
-  "alpha_rise": 0.75,
+  "alpha_rise": 0.5,
   "device": 1,
   "channels": [
     2,
@@ -16,6 +16,6 @@
     "ARM4",
     "ARM5"
   ],
-  "spike_threshold_db": 12.5,
-  "alpha_decay": 0.8
+  "spike_threshold_db": 4.0,
+  "alpha_decay": 0.48
 }
