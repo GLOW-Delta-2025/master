@@ -32,7 +32,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_delay_ms": 10.0,
     "poll_interval": 0.5,
     # simple mapping of channel names (list ordered to channels)
-    "names": ["ARM1","ARM2","ARM3","ARM5","ARM4"],
+    "names": ["ARM1","ARM2","ARM3","ARM4","ARM5"],
 }
 
 

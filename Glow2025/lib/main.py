@@ -14,8 +14,8 @@ except Exception:
         return {}
 
 class AudioProcessor:
-    def __init__(self, device: int = 2,
-                 channels: Iterable[int] = (6, 7),
+    def __init__(self, device: int = 1,
+                 channels: Iterable[int] = (3,4,5,6,7),
                  samplerate: int = 48000,
                  spike_threshold_db: float = 6.0,
                  noise_init_db: float = -50.0,
@@ -82,8 +82,8 @@ class AudioProcessor:
         if cfg is None:
             cfg = get_config()
         # map keys with sensible fallbacks
-        device = int(cfg.get('device', 2))
-        channels = tuple(cfg.get('channels', (6, 7)))
+        device = int(cfg.get('device', 1))
+        channels = tuple(cfg.get('channels', (3,4,5,6,7)))
         samplerate = int(cfg.get('samplerate', 48000))
         spike_threshold_db = float(cfg.get('spike_threshold_db', 6.0))
         noise_init_db = float(cfg.get('noise_init_db', -50.0))
