@@ -18,7 +18,7 @@ class AudioProcessorLib:
       - spike callbacks: fn(channel_index, spike_obj, avg_db, noise_db)
     """
 
-    def __init__(self, *, device: int = 1, channels: Iterable[int] = (6, 7),
+    def __init__(self, *, device: int = 1, channels: Iterable[int] = (3,4,5,6,7),
                  poll_interval: float = 0.5, start_stream: bool = True, **processor_kwargs):
         # processor_kwargs are forwarded to AudioProcessor constructor
         self.processor = AudioProcessor(device=device, channels=tuple(channels), **processor_kwargs)
@@ -121,7 +121,7 @@ if __name__ == '__main__':
     def spike_print(ch, spike, avg, noise):
         print('SPIKE cb', ch, spike, avg, noise)
 
-    lib = AudioProcessorLib(device=1, channels=(6,7), spike_threshold_db=4.0)
+    lib = AudioProcessorLib(device=1, channels=(3,4,5,6,7), spike_threshold_db=4.0)
     lib.register_spike_callback(spike_print)
     lib.start()
     try:

@@ -110,8 +110,7 @@ class RequestType(Enum):
     START_CLIMAX_TOP = "START_CLIMAX_TOP"            # Mac → TOP (NO PARAMS)
     CLIMAX_DONE_CENTER = "CLIMAX_DONE_CENTER"        # CENTER → Mac (REQUEST)
     CLIMAX_DONE_TOP = "CLIMAX_DONE_TOP"              # TOP → Mac (REQUEST)
- 
-    # Keep-alive
+            
     PING = "PING"
  
 class StarState(Enum):
@@ -226,7 +225,7 @@ class MacMiniController:
         if AudioProcessorLib is not None:
             try:
                 # Map audio channels to arms via simple modulo mapping.
-                self.audio_lib = AudioProcessorLib(start_stream=True, device=1, channels=[3,4,5,7,6])
+                self.audio_lib = AudioProcessorLib(start_stream=True, device=1, channels=[3,4,5,6,7])
                 def _spike_cb(ch, spike, avg_db, noise_db):
                     try:
                         arm_num = self.audio_lib.processor.channels.index(ch) if ch in self.audio_lib.processor.channels else None
