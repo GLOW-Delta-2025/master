@@ -46,11 +46,11 @@ except Exception:
     AudioProcessorLib = None
  
 # ---------------- CONFIG ----------------
-SERIAL_PORT = "/dev/tty.usbmodem83171401" #"/dev/tty.usbmodem83171401"
+SERIAL_PORT = "/dev/tty.usbmodem83171401" #"/dev/tty.usbmodem14301" 
 SERIAL_BAUD = 115200
  
 NUM_ARMS = 5
-MAX_STARS_FOR_CLIMAX = 50
+MAX_STARS_FOR_CLIMAX = 25
  
 PEAK_TIMEOUT = 10.0         # seconds without peaks before auto-send
 STAR_SEND_TIME = 20.0       # seconds from MAKE_STAR confirm before auto-send
@@ -226,7 +226,7 @@ class MacMiniController:
         if AudioProcessorLib is not None:
             try:
                 # Map audio channels to arms via simple modulo mapping.
-                self.audio_lib = AudioProcessorLib(start_stream=True, device=1, channels=[2,4,5,6])
+                self.audio_lib = AudioProcessorLib(start_stream=True, device=1, channels=[3,4,5,7,6])
                 def _spike_cb(ch, spike, avg_db, noise_db):
                     try:
                         arm_num = self.audio_lib.processor.channels.index(ch) if ch in self.audio_lib.processor.channels else None
