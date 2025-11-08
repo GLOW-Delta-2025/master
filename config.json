@@ -13,8 +13,8 @@
     "ARM1",
     "ARM2",
     "ARM3",
-    "ARM5",
-    "ARM4"
+    "ARM4",
+    "ARM5"
   ],
   "spike_threshold_db": 4.0,
   "alpha_decay": 0.48
